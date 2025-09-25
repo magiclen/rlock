@@ -6,13 +6,16 @@ It is an easy-to-use Redis-backed lock library providing both async and sync Mut
 ## Examples
 
 ```rust,no_run
+# #[cfg(feature = "async")]
 use tokio::task::JoinSet;
+# #[cfg(feature = "async")]
 use rlock::async_lock::RLock;
 
-static mut COUNTER: u32 = 0;
-
+# #[cfg(feature = "async")]
 #[tokio::main]
 async fn main() {
+    static mut COUNTER: u32 = 0;
+
     let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
 
     async fn counter_increase(rlock: RLock) {
@@ -39,6 +42,9 @@ async fn main() {
 
     rlock.shutdown().await;
 }
+
+# #[cfg(not(feature = "async"))]
+# fn main() {}
 ```
 
 ## Roadmap / TODO

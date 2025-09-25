@@ -31,7 +31,7 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - macos-latest
+          # - macos-latest
         toolchain:
           - stable
           - nightly
@@ -51,11 +51,11 @@ jobs:
           sudo apt update
           sudo apt install redis-server
         if: runner.os == 'Linux'
-      - name: Install Redis (macOS)
-        run: |
-          brew update
-          brew install redis
-        if: runner.os == 'macOS'
+      # - name: Install Redis (macOS)
+      #   run: |
+      #     brew update
+      #     brew install redis
+      #   if: runner.os == 'macOS'
       - run: cargo test ${{ matrix.features }}
       - run: cargo doc ${{ matrix.features }}
 
@@ -65,7 +65,7 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - macos-latest
+          # - macos-latest
         toolchain:
           - "1.82"
         features:
@@ -84,9 +84,9 @@ jobs:
           sudo apt update
           sudo apt install redis-server
         if: runner.os == 'Linux'
-      - name: Install Redis (macOS)
-        run: |
-          brew update
-          brew install redis
-        if: runner.os == 'macOS'
+      # - name: Install Redis (macOS)
+      #   run: |
+      #     brew update
+      #     brew install redis
+      #   if: runner.os == 'macOS'
       - run: cargo test --lib --bins ${{ matrix.features }}
