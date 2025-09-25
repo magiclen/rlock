@@ -1,0 +1,92 @@
+name: CI
+
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+  
+jobs:
+  rustfmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt
+      - uses: actions-rust-lang/rustfmt@v1
+      
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        toolchain:
+          - stable
+          - nightly
+        features:
+          -
+          - --no-default-features
+          - --no-default-features --features async
+    name: Test ${{ matrix.toolchain }} on ${{ matrix.os }} (${{ matrix.features }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - name: Install Redis (Linux)
+        run: |
+          sudo apt update
+          sudo apt install redis-server
+        if: runner.os == 'Linux'
+      - name: Install Redis (macOS)
+        run: |
+          brew update
+          brew install redis
+        if: runner.os == 'macOS'
+      - run: cargo test ${{ matrix.features }}
+      - run: cargo doc ${{ matrix.features }}
+
+  MSRV:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        toolchain:
+          - "1.82"
+        features:
+          -
+          - --no-default-features
+          - --no-default-features --features async
+    name: Test ${{ matrix.toolchain }} on ${{ matrix.os }} (${{ matrix.features }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - name: Install Redis (Linux)
+        run: |
+          sudo apt update
+          sudo apt install redis-server
+        if: runner.os == 'Linux'
+      - name: Install Redis (macOS)
+        run: |
+          brew update
+          brew install redis
+        if: runner.os == 'macOS'
+      - run: cargo test --lib --bins ${{ matrix.features }}
