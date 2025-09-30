@@ -76,4 +76,4 @@ pub use functions::*;
 #[cfg(any(feature = "async", feature = "sync"))]
 pub use options::*;
 #[cfg(any(feature = "async", feature = "sync"))]
-pub use redis::{ConnectionInfo, IntoConnectionInfo};
+pub use redis;
