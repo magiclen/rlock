@@ -1,6 +1,6 @@
 [package]
 name = "rlock"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 rust-version = "1.82"
 repository = "https://github.com/magiclen/rlock"
@@ -14,7 +14,6 @@ include = ["src/**/*", "Cargo.toml", "README.md", "LICENSE"]
 [dependencies]
 redis = { version = "0.32", optional = true, default-features = false, features = ["script"] }
 
-url = { version = "2", optional = true }
 uuid = { version = "1", optional = true, features = ["v4"] }
 
 once_cell = { version = "1", optional = true }
@@ -34,7 +33,7 @@ default = ["async"]
 async = ["redis", "redis/tokio-comp", "redis/connection-manager", "dep:tokio", "dep:educe"]
 sync = ["redis"]
 
-redis = ["dep:redis", "dep:url", "dep:uuid", "dep:once_cell", "dep:tracing"]
+redis = ["dep:redis", "dep:uuid", "dep:once_cell", "dep:tracing"]
 
 [package.metadata.docs.rs]
 all-features = true
