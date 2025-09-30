@@ -8,3 +8,4 @@ mod tests;
 
 pub use lock::*;
 pub use manager::*;
+pub use url;
