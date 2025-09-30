@@ -8,4 +8,3 @@ mod tests;
 
 pub use lock::*;
 pub use manager::*;
-pub use redis::{ConnectionInfo, IntoConnectionInfo};
