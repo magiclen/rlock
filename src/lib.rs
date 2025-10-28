@@ -55,7 +55,7 @@ async fn main() {
 - [ ] Synchronous read-write lock
 */
 
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg(feature = "async")]
 /// This module provides an async API based on **Tokio**.
