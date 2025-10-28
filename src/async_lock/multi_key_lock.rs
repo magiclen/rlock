@@ -1,5 +1,5 @@
 use std::{
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
     time::SystemTime,
 };
 
@@ -9,10 +9,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use super::{operations::*, RLock};
+use super::{RLock, operations::*};
 use crate::{
-    release_request::{ReleaseRequest, ReleaseRequestKey},
     AcquireError, AcquireOptions, ReleaseError,
+    release_request::{ReleaseRequest, ReleaseRequestKey},
 };
 
 /// A guard object representing an acquired Redis lock (multi-key).
@@ -155,7 +155,7 @@ impl RLock {
     /// ```rust,no_run
     /// use std::{sync::Arc, time::Duration};
     ///
-    /// use rlock::{async_lock::RLock, AcquireOptions};
+    /// use rlock::{AcquireOptions, async_lock::RLock};
     ///
     /// # #[tokio::main(flavor = "current_thread")]
     /// # async fn main() {

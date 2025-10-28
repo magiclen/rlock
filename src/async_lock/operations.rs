@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use redis::{aio, RedisResult};
+use redis::{RedisResult, aio};
 
 use crate::scripts::*;
 

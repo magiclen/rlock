@@ -1,15 +1,15 @@
 use std::{
     fmt::{self, Formatter},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
 use educe::Educe;
-use redis::{aio::ConnectionManager, Client, IntoConnectionInfo, RedisError};
+use redis::{Client, IntoConnectionInfo, RedisError, aio::ConnectionManager};
 use tokio::{
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
     task::JoinHandle,
 };
 
