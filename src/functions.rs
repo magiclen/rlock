@@ -14,7 +14,13 @@ pub fn build_redis_key_with_prefix(prefix: impl AsRef<str>, key: impl AsRef<str>
     let prefix = prefix.as_ref();
     let key = key.as_ref();
 
-    format!("{prefix}:{key}")
+    let mut s = String::with_capacity(prefix.len() + 1 + key.len());
+
+    s.push_str(prefix);
+    s.push(':');
+    s.push_str(key);
+
+    s
 }
 
 /// Builds a Redis key by joining multiple parts with `:` as a separator.
@@ -31,19 +37,17 @@ pub fn build_redis_key_with_prefix(prefix: impl AsRef<str>, key: impl AsRef<str>
 pub fn build_redis_key_from_parts<S>(key_parts: impl IntoIterator<Item = S>) -> String
 where
     S: AsRef<str>, {
-    let mut s = String::new();
+    let mut key_parts = key_parts.into_iter();
 
-    for part in key_parts.into_iter() {
-        s.push_str(part.as_ref());
+    let Some(first_part) = key_parts.next() else {
+        return String::new();
+    };
+
+    let mut s = String::from(first_part.as_ref());
+
+    for part in key_parts {
         s.push(':');
-    }
-
-    let len = s.len();
-
-    if len > 0 {
-        unsafe {
-            s.as_mut_vec().set_len(len - 1);
-        }
+        s.push_str(part.as_ref());
     }
 
     s
@@ -68,17 +72,14 @@ pub fn build_redis_key_from_parts_with_prefix<S>(
 ) -> String
 where
     S: AsRef<str>, {
-    let mut s = format!("{}:", prefix.as_ref());
+    let prefix = prefix.as_ref();
+    let mut s = String::with_capacity(prefix.len());
 
-    for part in key_parts.into_iter() {
-        s.push_str(part.as_ref());
+    s.push_str(prefix);
+
+    for part in key_parts {
         s.push(':');
-    }
-
-    let len = s.len();
-
-    unsafe {
-        s.as_mut_vec().set_len(len - 1);
+        s.push_str(part.as_ref());
     }
 
     s

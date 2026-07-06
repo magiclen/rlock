@@ -1,7 +1,8 @@
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
+
 use redis::Script;
 
-pub(crate) static SCRIPT_ACQUIRE_MULTI_KEY_LOCK: Lazy<Script> = Lazy::new(|| {
+pub(crate) static SCRIPT_ACQUIRE_MULTI_KEY_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS    = the lock keys to set
     // ARGV[1] = token (the UUID of the lock owner)
     // ARGV[2] = new TTL (milliseconds)
@@ -25,7 +26,7 @@ pub(crate) static SCRIPT_ACQUIRE_MULTI_KEY_LOCK: Lazy<Script> = Lazy::new(|| {
     )
 });
 
-pub(crate) static SCRIPT_RENEW_LOCK: Lazy<Script> = Lazy::new(|| {
+pub(crate) static SCRIPT_RENEW_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS[1] = the lock key to renew
     // ARGV[1] = token (the UUID of the lock owner)
     // ARGV[2] = new TTL (milliseconds)
@@ -40,7 +41,7 @@ pub(crate) static SCRIPT_RENEW_LOCK: Lazy<Script> = Lazy::new(|| {
     )
 });
 
-pub(crate) static SCRIPT_RENEW_MULTI_KEY_LOCK: Lazy<Script> = Lazy::new(|| {
+pub(crate) static SCRIPT_RENEW_MULTI_KEY_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS[1] = the lock key to renew
     // ARGV[1] = token (the UUID of the lock owner)
     // ARGV[2] = new TTL (milliseconds)
@@ -65,7 +66,7 @@ pub(crate) static SCRIPT_RENEW_MULTI_KEY_LOCK: Lazy<Script> = Lazy::new(|| {
     )
 });
 
-pub(crate) static SCRIPT_RELEASE_LOCK: Lazy<Script> = Lazy::new(|| {
+pub(crate) static SCRIPT_RELEASE_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS[1] = the lock key to release
     // ARGV[1] = token (the UUID of the lock owner)
     Script::new(
@@ -79,7 +80,7 @@ pub(crate) static SCRIPT_RELEASE_LOCK: Lazy<Script> = Lazy::new(|| {
     )
 });
 
-pub(crate) static SCRIPT_RELEASE_MULTI_KEY_LOCK: Lazy<Script> = Lazy::new(|| {
+pub(crate) static SCRIPT_RELEASE_MULTI_KEY_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS[1] = the lock key to release
     // ARGV[1] = token (the UUID of the lock owner)
     Script::new(

@@ -1,6 +1,8 @@
+#[cfg(debug_assertions)]
+use std::collections::HashSet;
 use std::{
     sync::{Arc, atomic::Ordering},
-    time::SystemTime,
+    time::Instant,
 };
 
 use tokio::{
@@ -116,6 +118,10 @@ impl Drop for RMultiKeyLockGuard {
 impl RLock {
     /// Acquires a mutex lock with mutiple keys.
     ///
+    /// The key list must not be empty and each key must be unique.
+    /// Debug builds assert these programmer invariants.
+    /// Release builds skip these checks for performance because callers are expected to pass keys chosen by the program rather than direct user input.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -150,6 +156,10 @@ impl RLock {
 
     /// Acquires a mutex lock with mutiple keys and options.
     ///
+    /// The key list must not be empty and each key must be unique.
+    /// Debug builds assert these programmer invariants.
+    /// Release builds skip these checks for performance because callers are expected to pass keys chosen by the program rather than direct user input.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -167,7 +177,10 @@ impl RLock {
     ///             String::from("rlock:example"),
     ///             String::from("rlock:example2"),
     ///         ]),
-    ///         AcquireOptions::new().ttl(Duration::from_secs(3)),
+    ///         AcquireOptions::builder()
+    ///             .ttl(Duration::from_secs(3))
+    ///             .build()
+    ///             .unwrap(),
     ///     )
     ///     .await
     ///     .unwrap();
@@ -188,16 +201,35 @@ impl RLock {
 
         let keys = keys.into();
 
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(!keys.is_empty(), "multi-key mutex requires at least one key");
+
+            let mut unique_keys = HashSet::with_capacity(keys.len());
+
+            for key in keys.iter() {
+                debug_assert!(
+                    unique_keys.insert(key.as_str()),
+                    "multi-key mutex requires unique keys"
+                );
+            }
+        }
+
+        let retry_interval = options.retry_interval();
+        let lock_timeout = options.lock_timeout();
+        let ttl = options.ttl();
+        let renew_interval = options.renew_interval();
+
         let uuid = Arc::new(Uuid::new_v4().to_string());
 
-        let start_time = SystemTime::now();
+        let start_time = Instant::now();
 
         loop {
             let result = acquire_multi_key_lock_async(
                 &mut self.inner.connection_manager.clone(),
                 &keys,
                 uuid.as_ref(),
-                options.ttl,
+                ttl,
             )
             .await?;
 
@@ -208,19 +240,19 @@ impl RLock {
             // an lock with the same key exists, so we cannot acquire
 
             // check lock_timeout
-            if let Some(lock_timeout) = options.lock_timeout
-                && SystemTime::now().duration_since(start_time).unwrap() >= lock_timeout
+            if let Some(lock_timeout) = lock_timeout
+                && start_time.elapsed() >= lock_timeout
             {
                 return Err(AcquireError::LockTimeout);
             }
 
             // sleep retry_interval to allow other tasks to run
-            time::sleep(options.retry_interval).await;
+            time::sleep(retry_interval).await;
         }
 
         // a new lock has been created
 
-        let stop_tx = if let Some(renew_interval) = options.renew_interval {
+        let stop_tx = if let Some(renew_interval) = renew_interval {
             // renew automatically
             let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
 
@@ -238,8 +270,8 @@ impl RLock {
 
                             break
                         },
-                        _ = time::sleep(renew_interval.unwrap_or_else(|| options.ttl / 2)) => {
-                            match renew_multi_key_lock_async(&mut connection_manager, &keys, uuid.as_str(), options.ttl).await {
+                        _ = time::sleep(renew_interval.unwrap_or_else(|| ttl / 2)) => {
+                            match renew_multi_key_lock_async(&mut connection_manager, &keys, uuid.as_str(), ttl).await {
                                 Ok(false) => {
                                     tracing::trace!(uuid = %uuid, "cannot find the lock, close the renewal task");
                                     break;

@@ -1,18 +1,17 @@
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, LazyLock, Mutex},
     time::Duration,
 };
 
-use once_cell::sync::Lazy;
 use tokio::task::JoinSet;
 
 use super::*;
 
-static REDIS_URL: Lazy<String> = Lazy::new(|| {
+static REDIS_URL: LazyLock<String> = LazyLock::new(|| {
     std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string())
 });
-static GLOBAL_LOCK_1_2: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-static GLOBAL_LOCK_3_4: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static GLOBAL_LOCK_1_2: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static GLOBAL_LOCK_3_4: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[allow(clippy::await_holding_lock)]
 async fn test_rlock_new_and_shutdown_1_2() {

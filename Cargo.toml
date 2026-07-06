@@ -16,12 +16,10 @@ redis = { version = "1", optional = true, default-features = false, features = [
 
 uuid = { version = "1", optional = true, features = ["v4"] }
 
-once_cell = { version = "1", optional = true }
-
 tracing = { version = "0.1", optional = true }
 
 # async
-tokio = { version = "1", optional = true, default-features = false, features = ["macros"] }
+tokio = { version = "1", optional = true, default-features = false, features = ["macros", "rt", "sync", "time"] }
 educe = { version = "0.7", optional = true, default-features = false, features = ["Debug"] }
 
 [dev-dependencies]
@@ -33,7 +31,7 @@ default = ["async"]
 async = ["redis", "redis/tokio-comp", "redis/connection-manager", "dep:tokio", "dep:educe"]
 sync = ["redis"]
 
-redis = ["dep:redis", "dep:uuid", "dep:once_cell", "dep:tracing"]
+redis = ["dep:redis", "dep:uuid", "dep:tracing"]
 
 [package.metadata.docs.rs]
 all-features = true

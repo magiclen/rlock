@@ -1,6 +1,6 @@
 use std::{
     sync::{Arc, atomic::Ordering},
-    time::SystemTime,
+    time::Instant,
 };
 
 use tokio::{
@@ -145,7 +145,10 @@ impl RLock {
     /// let lock = rlock
     ///     .acquire_mutex_with_options(
     ///         "rlock:example",
-    ///         AcquireOptions::new().ttl(Duration::from_secs(3)),
+    ///         AcquireOptions::builder()
+    ///             .ttl(Duration::from_secs(3))
+    ///             .build()
+    ///             .unwrap(),
     ///     )
     ///     .await
     ///     .unwrap();
@@ -165,17 +168,21 @@ impl RLock {
         }
 
         let key: &str = key.as_ref();
+        let retry_interval = options.retry_interval();
+        let lock_timeout = options.lock_timeout();
+        let ttl = options.ttl();
+        let renew_interval = options.renew_interval();
 
         let uuid = Arc::new(Uuid::new_v4().to_string());
 
-        let start_time = SystemTime::now();
+        let start_time = Instant::now();
 
         loop {
             let result = acquire_lock_async(
                 &mut self.inner.connection_manager.clone(),
                 key,
                 uuid.as_ref(),
-                options.ttl,
+                ttl,
             )
             .await?;
 
@@ -186,20 +193,21 @@ impl RLock {
             // an lock with the same key exists, so we cannot acquire
 
             // check lock_timeout
-            if let Some(lock_timeout) = options.lock_timeout
-                && SystemTime::now().duration_since(start_time).unwrap() >= lock_timeout {
-                    return Err(AcquireError::LockTimeout);
-                }
+            if let Some(lock_timeout) = lock_timeout
+                && start_time.elapsed() >= lock_timeout
+            {
+                return Err(AcquireError::LockTimeout);
+            }
 
             // sleep retry_interval to allow other tasks to run
-            time::sleep(options.retry_interval).await;
+            time::sleep(retry_interval).await;
         }
 
         let key = Arc::new(String::from(key));
 
         // a new lock has been created
 
-        let stop_tx = if let Some(renew_interval) = options.renew_interval {
+        let stop_tx = if let Some(renew_interval) = renew_interval {
             // renew automatically
             let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
 
@@ -217,8 +225,8 @@ impl RLock {
 
                             break
                         },
-                        _ = time::sleep(renew_interval.unwrap_or_else(|| options.ttl / 2)) => {
-                            match renew_lock_async(&mut connection_manager, key.as_str(), uuid.as_str(), options.ttl).await {
+                        _ = time::sleep(renew_interval.unwrap_or_else(|| ttl / 2)) => {
+                            match renew_lock_async(&mut connection_manager, key.as_str(), uuid.as_str(), ttl).await {
                                 Ok(false) => {
                                     tracing::trace!(uuid = %uuid, "cannot find the lock, close the renewal task");
                                     break;
