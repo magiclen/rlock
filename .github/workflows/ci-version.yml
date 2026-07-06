@@ -51,7 +51,7 @@ jobs:
           - ubuntu-latest
           # - macos-latest
         toolchain:
-          - "1.85"
+          - "1.89"
         features:
           -
           - --no-default-features

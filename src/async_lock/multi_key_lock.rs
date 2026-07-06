@@ -208,10 +208,10 @@ impl RLock {
             // an lock with the same key exists, so we cannot acquire
 
             // check lock_timeout
-            if let Some(lock_timeout) = options.lock_timeout {
-                if SystemTime::now().duration_since(start_time).unwrap() >= lock_timeout {
-                    return Err(AcquireError::LockTimeout);
-                }
+            if let Some(lock_timeout) = options.lock_timeout
+                && SystemTime::now().duration_since(start_time).unwrap() >= lock_timeout
+            {
+                return Err(AcquireError::LockTimeout);
             }
 
             // sleep retry_interval to allow other tasks to run
