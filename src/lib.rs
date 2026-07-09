@@ -47,10 +47,53 @@ async fn main() {
 # fn main() {}
 ```
 
+```rust,no_run
+# #[cfg(feature = "sync")]
+use rlock::sync_lock::RLock;
+
+# #[cfg(feature = "sync")]
+fn main() {
+    static mut COUNTER: u32 = 0;
+
+    let rlock = RLock::new("redis://127.0.0.1:6379/0").unwrap();
+
+    fn counter_increase(rlock: RLock) {
+        let lock = rlock.acquire_mutex("lock").unwrap();
+
+        // ----- critical section -----
+
+        unsafe { COUNTER += 1 };
+
+        // ----------------------------
+
+        drop(lock);
+    }
+
+    let mut threads = Vec::new();
+
+    for _ in 0..100 {
+        let rlock = rlock.clone();
+
+        threads.push(std::thread::spawn(move || counter_increase(rlock)));
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    assert_eq!(100, unsafe { COUNTER });
+
+    rlock.shutdown();
+}
+
+# #[cfg(not(feature = "sync"))]
+# fn main() {}
+```
+
 ## Roadmap / TODO
 
 - [x] Asynchronous mutex lock
-- [ ] Synchronous mutex lock
+- [x] Synchronous mutex lock
 - [ ] Asynchronous read-write lock
 - [ ] Synchronous read-write lock
 */
@@ -69,6 +112,9 @@ mod options;
 mod release_request;
 #[cfg(any(feature = "async", feature = "sync"))]
 mod scripts;
+#[cfg(feature = "sync")]
+/// This module provides a sync API based on threads with a simple built-in connection pool.
+pub mod sync_lock;
 
 #[cfg(any(feature = "async", feature = "sync"))]
 pub use errors::*;
