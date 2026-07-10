@@ -102,9 +102,7 @@ pub(crate) static SCRIPT_RELEASE_MULTI_KEY_LOCK: LazyLock<Script> = LazyLock::ne
 // The field "w" holds the writer UUID, and each field "r:<uuid>" holds the expiry timestamp (milliseconds) of a reader.
 // The PTTL of the hash is kept not shorter than the furthest holder expiry, and it is only extended after a PTTL comparison because "PEXPIRE ... GT" requires Redis 7.
 // These scripts write after reading the server time, which relies on effect replication, so Redis 5.0 or later is required.
-// TODO: remove the cfg gates on the read-write lock scripts once the synchronous read-write lock is implemented
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_ACQUIRE_READ_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS[1] = the lock key (a hash) to acquire
     // ARGV[1] = token (the UUID of the reader)
@@ -133,7 +131,6 @@ pub(crate) static SCRIPT_ACQUIRE_READ_LOCK: LazyLock<Script> = LazyLock::new(|| 
     )
 });
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_RENEW_READ_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS[1] = the lock key (a hash) to renew
     // ARGV[1] = token (the UUID of the reader)
@@ -164,7 +161,6 @@ pub(crate) static SCRIPT_RENEW_READ_LOCK: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_RELEASE_READ_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS[1] = the lock key (a hash) to release
     // ARGV[1] = token (the UUID of the reader)
@@ -176,7 +172,6 @@ pub(crate) static SCRIPT_RELEASE_READ_LOCK: LazyLock<Script> = LazyLock::new(|| 
     )
 });
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_ACQUIRE_WRITE_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS[1] = the lock key (a hash) to acquire
     // ARGV[1] = token (the UUID of the writer)
@@ -211,7 +206,6 @@ pub(crate) static SCRIPT_ACQUIRE_WRITE_LOCK: LazyLock<Script> = LazyLock::new(||
     )
 });
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_RENEW_WRITE_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS[1] = the lock key (a hash) to renew
     // ARGV[1] = token (the UUID of the writer)
@@ -227,7 +221,6 @@ pub(crate) static SCRIPT_RENEW_WRITE_LOCK: LazyLock<Script> = LazyLock::new(|| {
     )
 });
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_RELEASE_WRITE_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS[1] = the lock key (a hash) to release
     // ARGV[1] = token (the UUID of the writer)
@@ -243,7 +236,6 @@ pub(crate) static SCRIPT_RELEASE_WRITE_LOCK: LazyLock<Script> = LazyLock::new(||
     )
 });
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_ACQUIRE_MULTI_KEY_READ_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS    = the lock keys (hashes) to acquire
     // ARGV[1] = token (the UUID of the reader)
@@ -277,7 +269,6 @@ pub(crate) static SCRIPT_ACQUIRE_MULTI_KEY_READ_LOCK: LazyLock<Script> = LazyLoc
     )
 });
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_RENEW_MULTI_KEY_READ_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS    = the lock keys (hashes) to renew
     // ARGV[1] = token (the UUID of the reader)
@@ -312,7 +303,6 @@ pub(crate) static SCRIPT_RENEW_MULTI_KEY_READ_LOCK: LazyLock<Script> = LazyLock:
     )
 });
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_RELEASE_MULTI_KEY_READ_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS    = the lock keys (hashes) to release
     // ARGV[1] = token (the UUID of the reader)
@@ -335,7 +325,6 @@ pub(crate) static SCRIPT_RELEASE_MULTI_KEY_READ_LOCK: LazyLock<Script> = LazyLoc
     )
 });
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_ACQUIRE_MULTI_KEY_WRITE_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS    = the lock keys (hashes) to acquire
     // ARGV[1] = token (the UUID of the writer)
@@ -378,7 +367,6 @@ pub(crate) static SCRIPT_ACQUIRE_MULTI_KEY_WRITE_LOCK: LazyLock<Script> = LazyLo
     )
 });
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_RENEW_MULTI_KEY_WRITE_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS    = the lock keys (hashes) to renew
     // ARGV[1] = token (the UUID of the writer)
@@ -404,7 +392,6 @@ pub(crate) static SCRIPT_RENEW_MULTI_KEY_WRITE_LOCK: LazyLock<Script> = LazyLock
     )
 });
 
-#[cfg(feature = "async")]
 pub(crate) static SCRIPT_RELEASE_MULTI_KEY_WRITE_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // KEYS    = the lock keys (hashes) to release
     // ARGV[1] = token (the UUID of the writer)

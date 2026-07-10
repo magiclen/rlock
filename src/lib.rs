@@ -146,12 +146,63 @@ fn main() {
 # fn main() {}
 ```
 
-## Roadmap / TODO
+```rust,no_run
+# #[cfg(feature = "sync")]
+use rlock::sync_lock::RLock;
 
-- [x] Asynchronous mutex lock
-- [x] Synchronous mutex lock
-- [x] Asynchronous read-write lock
-- [ ] Synchronous read-write lock
+# #[cfg(feature = "sync")]
+fn main() {
+    static mut COUNTER: u32 = 0;
+
+    let rlock = RLock::new("redis://127.0.0.1:6379/0").unwrap();
+
+    fn writer(rlock: RLock) {
+        let lock = rlock.acquire_write("lock").unwrap();
+
+        // ----- critical section -----
+
+        unsafe { COUNTER += 1 };
+
+        // ----------------------------
+
+        drop(lock);
+    }
+
+    fn reader(rlock: RLock) {
+        let lock = rlock.acquire_read("lock").unwrap();
+
+        // ----- shared section -----
+
+        // multiple readers can hold the lock at the same time
+        let _value = unsafe { COUNTER };
+
+        // --------------------------
+
+        drop(lock);
+    }
+
+    let mut threads = Vec::new();
+
+    for _ in 0..100 {
+        let rlock_for_writer = rlock.clone();
+        let rlock_for_reader = rlock.clone();
+
+        threads.push(std::thread::spawn(move || writer(rlock_for_writer)));
+        threads.push(std::thread::spawn(move || reader(rlock_for_reader)));
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    assert_eq!(100, unsafe { COUNTER });
+
+    rlock.shutdown();
+}
+
+# #[cfg(not(feature = "sync"))]
+# fn main() {}
+```
 */
 
 #![cfg_attr(docsrs, feature(doc_cfg))]

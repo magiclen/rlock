@@ -131,12 +131,58 @@ fn main() {
 }
 ```
 
-## Roadmap / TODO
+```rust
+use rlock::sync_lock::RLock;
 
-- [x] Asynchronous mutex lock
-- [x] Synchronous mutex lock
-- [x] Asynchronous read-write lock
-- [ ] Synchronous read-write lock
+static mut COUNTER: u32 = 0;
+
+fn main() {
+    let rlock = RLock::new("redis://127.0.0.1:6379/0").unwrap();
+
+    fn writer(rlock: RLock) {
+        let lock = rlock.acquire_write("lock").unwrap();
+
+        // ----- critical section -----
+
+        unsafe { COUNTER += 1 };
+
+        // ----------------------------
+
+        drop(lock);
+    }
+
+    fn reader(rlock: RLock) {
+        let lock = rlock.acquire_read("lock").unwrap();
+
+        // ----- shared section -----
+
+        // multiple readers can hold the lock at the same time
+        let _value = unsafe { COUNTER };
+
+        // --------------------------
+
+        drop(lock);
+    }
+
+    let mut threads = Vec::new();
+
+    for _ in 0..100 {
+        let rlock_for_writer = rlock.clone();
+        let rlock_for_reader = rlock.clone();
+
+        threads.push(std::thread::spawn(move || writer(rlock_for_writer)));
+        threads.push(std::thread::spawn(move || reader(rlock_for_reader)));
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    assert_eq!(100, unsafe { COUNTER });
+
+    rlock.shutdown();
+}
+```
 
 ## Crates.io
 

@@ -69,10 +69,26 @@ pub(crate) fn release_multi_key_lock_sync(
     SCRIPT_RELEASE_MULTI_KEY_LOCK.key(keys).arg(uuid).invoke(conn)
 }
 
-// the read-write lock release operations below serve the release requests coming from the async read-write lock guards
-// TODO: remove the cfg gates and add the remaining read-write lock operations once the synchronous read-write lock is implemented
+#[inline]
+pub(crate) fn acquire_read_lock_sync(
+    conn: &mut impl ConnectionLike,
+    key: &str,
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_ACQUIRE_READ_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke(conn)
+}
 
-#[cfg(feature = "async")]
+#[inline]
+pub(crate) fn renew_read_lock_sync(
+    conn: &mut impl ConnectionLike,
+    key: &str,
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_RENEW_READ_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke(conn)
+}
+
 #[inline]
 pub(crate) fn release_read_lock_sync(
     conn: &mut impl ConnectionLike,
@@ -82,7 +98,26 @@ pub(crate) fn release_read_lock_sync(
     SCRIPT_RELEASE_READ_LOCK.key(key).arg(uuid).invoke(conn)
 }
 
-#[cfg(feature = "async")]
+#[inline]
+pub(crate) fn acquire_write_lock_sync(
+    conn: &mut impl ConnectionLike,
+    key: &str,
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_ACQUIRE_WRITE_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke(conn)
+}
+
+#[inline]
+pub(crate) fn renew_write_lock_sync(
+    conn: &mut impl ConnectionLike,
+    key: &str,
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_RENEW_WRITE_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke(conn)
+}
+
 #[inline]
 pub(crate) fn release_write_lock_sync(
     conn: &mut impl ConnectionLike,
@@ -92,7 +127,26 @@ pub(crate) fn release_write_lock_sync(
     SCRIPT_RELEASE_WRITE_LOCK.key(key).arg(uuid).invoke(conn)
 }
 
-#[cfg(feature = "async")]
+#[inline]
+pub(crate) fn acquire_multi_key_read_lock_sync(
+    conn: &mut impl ConnectionLike,
+    keys: &[String],
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_ACQUIRE_MULTI_KEY_READ_LOCK.key(keys).arg(uuid).arg(ttl.as_millis()).invoke(conn)
+}
+
+#[inline]
+pub(crate) fn renew_multi_key_read_lock_sync(
+    conn: &mut impl ConnectionLike,
+    keys: &[String],
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_RENEW_MULTI_KEY_READ_LOCK.key(keys).arg(uuid).arg(ttl.as_millis()).invoke(conn)
+}
+
 #[inline]
 pub(crate) fn release_multi_key_read_lock_sync(
     conn: &mut impl ConnectionLike,
@@ -102,7 +156,26 @@ pub(crate) fn release_multi_key_read_lock_sync(
     SCRIPT_RELEASE_MULTI_KEY_READ_LOCK.key(keys).arg(uuid).invoke(conn)
 }
 
-#[cfg(feature = "async")]
+#[inline]
+pub(crate) fn acquire_multi_key_write_lock_sync(
+    conn: &mut impl ConnectionLike,
+    keys: &[String],
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_ACQUIRE_MULTI_KEY_WRITE_LOCK.key(keys).arg(uuid).arg(ttl.as_millis()).invoke(conn)
+}
+
+#[inline]
+pub(crate) fn renew_multi_key_write_lock_sync(
+    conn: &mut impl ConnectionLike,
+    keys: &[String],
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_RENEW_MULTI_KEY_WRITE_LOCK.key(keys).arg(uuid).arg(ttl.as_millis()).invoke(conn)
+}
+
 #[inline]
 pub(crate) fn release_multi_key_write_lock_sync(
     conn: &mut impl ConnectionLike,

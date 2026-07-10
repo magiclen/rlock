@@ -102,19 +102,15 @@ impl RLock {
                         ReleaseRequestKey::Multiple(key) => {
                             release_multi_key_lock_sync(&mut *conn, key, req.uuid.as_str())
                         },
-                        #[cfg(feature = "async")]
                         ReleaseRequestKey::Read(key) => {
                             release_read_lock_sync(&mut *conn, key.as_str(), req.uuid.as_str())
                         },
-                        #[cfg(feature = "async")]
                         ReleaseRequestKey::Write(key) => {
                             release_write_lock_sync(&mut *conn, key.as_str(), req.uuid.as_str())
                         },
-                        #[cfg(feature = "async")]
                         ReleaseRequestKey::MultipleRead(key) => {
                             release_multi_key_read_lock_sync(&mut *conn, key, req.uuid.as_str())
                         },
-                        #[cfg(feature = "async")]
                         ReleaseRequestKey::MultipleWrite(key) => {
                             release_multi_key_write_lock_sync(&mut *conn, key, req.uuid.as_str())
                         },
