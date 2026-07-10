@@ -48,6 +48,62 @@ async fn main() {
 ```
 
 ```rust,no_run
+# #[cfg(feature = "async")]
+use tokio::task::JoinSet;
+# #[cfg(feature = "async")]
+use rlock::async_lock::RLock;
+
+# #[cfg(feature = "async")]
+#[tokio::main]
+async fn main() {
+    static mut COUNTER: u32 = 0;
+
+    let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+
+    async fn writer(rlock: RLock) {
+        let lock = rlock.acquire_write("lock").await.unwrap();
+
+        // ----- critical section -----
+
+        unsafe { COUNTER += 1 };
+
+        // ----------------------------
+
+        drop(lock);
+    }
+
+    async fn reader(rlock: RLock) {
+        let lock = rlock.acquire_read("lock").await.unwrap();
+
+        // ----- shared section -----
+
+        // multiple readers can hold the lock at the same time
+        let _value = unsafe { COUNTER };
+
+        // --------------------------
+
+        drop(lock);
+    }
+
+    let mut tasks = JoinSet::new();
+
+    for _ in 0..100 {
+        tasks.spawn(writer(rlock.clone()));
+        tasks.spawn(reader(rlock.clone()));
+    }
+
+    tasks.join_all().await;
+
+    assert_eq!(100, unsafe { COUNTER });
+
+    rlock.shutdown().await;
+}
+
+# #[cfg(not(feature = "async"))]
+# fn main() {}
+```
+
+```rust,no_run
 # #[cfg(feature = "sync")]
 use rlock::sync_lock::RLock;
 
@@ -94,7 +150,7 @@ fn main() {
 
 - [x] Asynchronous mutex lock
 - [x] Synchronous mutex lock
-- [ ] Asynchronous read-write lock
+- [x] Asynchronous read-write lock
 - [ ] Synchronous read-write lock
 */
 

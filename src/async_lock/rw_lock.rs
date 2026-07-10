@@ -1,0 +1,531 @@
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Instant,
+};
+
+use tokio::{
+    sync::{mpsc::error::TrySendError, oneshot},
+    time,
+};
+use uuid::Uuid;
+
+use super::{RLock, operations::*};
+use crate::{
+    AcquireError, AcquireOptions, ReleaseError,
+    release_request::{ReleaseRequest, ReleaseRequestKey},
+};
+
+/// A guard object representing an acquired Redis read lock.
+///
+/// # Behavior
+///
+/// * Multiple read guards can hold the same key at the same time, while a writer is excluded until all live readers are gone.
+/// * Dropping the guard automatically releases the lock unless the buffer of the lock release manager is full (in that case, the lock is released after its TTL expires in Redis)
+/// * If the renewal interval is not set to `None`, a background task (aka the renewal task) is spawned to extend the lock's TTL. The task is terminated when the lock is released.
+#[derive(Debug)]
+pub struct RReadLockGuard {
+    rlock:       RLock,
+    is_released: bool,
+    key:         Arc<String>,
+    uuid:        Arc<String>,
+    stop_tx:     Option<oneshot::Sender<()>>,
+}
+
+impl RReadLockGuard {
+    /// Releases the lock. If the lock is released, returns `Ok(())`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use rlock::async_lock::RLock;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let mut lock = rlock.acquire_read("rlock:example").await.unwrap();
+    ///
+    /// // shared section
+    ///
+    /// lock.release().await.unwrap();
+    /// # }
+    /// ```
+    #[inline]
+    pub async fn release(&mut self) -> Result<(), ReleaseError> {
+        if self.is_released {
+            return Ok(());
+        }
+
+        release_read_lock_async(
+            &mut self.rlock.inner.connection_manager.clone(),
+            self.key.as_str(),
+            self.uuid.as_str(),
+        )
+        .await?;
+
+        self.is_released = true;
+
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+
+        Ok(())
+    }
+
+    /// Determines whether the lock is released.
+    #[inline]
+    pub const fn is_released(&self) -> bool {
+        self.is_released
+    }
+}
+
+impl Drop for RReadLockGuard {
+    #[inline]
+    fn drop(&mut self) {
+        if self.is_released {
+            return;
+        }
+
+        if let Err(error) = self.rlock.request_tx.try_send(Some(ReleaseRequest {
+            key:  ReleaseRequestKey::Read(self.key.clone()),
+            uuid: self.uuid.clone(),
+        })) {
+            if matches!(error, TrySendError::Full(_)) {
+                tracing::warn!(
+                    uuid = %self.uuid,
+                    "the lock release manager is full, the lock will be released after its \
+                     TTL expires"
+                );
+            } else {
+                tracing::warn!(
+                    uuid = %self.uuid,
+                    "cannot send a lock release request: {error}",
+                );
+            }
+        }
+    }
+}
+
+/// A guard object representing an acquired Redis write lock.
+///
+/// # Behavior
+///
+/// * A write guard is exclusive: it excludes other writers and all readers on the same key.
+/// * Dropping the guard automatically releases the lock unless the buffer of the lock release manager is full (in that case, the lock is released after its TTL expires in Redis)
+/// * If the renewal interval is not set to `None`, a background task (aka the renewal task) is spawned to extend the lock's TTL. The task is terminated when the lock is released.
+#[derive(Debug)]
+pub struct RWriteLockGuard {
+    rlock:       RLock,
+    is_released: bool,
+    key:         Arc<String>,
+    uuid:        Arc<String>,
+    stop_tx:     Option<oneshot::Sender<()>>,
+}
+
+impl RWriteLockGuard {
+    /// Releases the lock. If the lock is released, returns `Ok(())`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use rlock::async_lock::RLock;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let mut lock = rlock.acquire_write("rlock:example").await.unwrap();
+    ///
+    /// // critial section
+    ///
+    /// lock.release().await.unwrap();
+    /// # }
+    /// ```
+    #[inline]
+    pub async fn release(&mut self) -> Result<(), ReleaseError> {
+        if self.is_released {
+            return Ok(());
+        }
+
+        release_write_lock_async(
+            &mut self.rlock.inner.connection_manager.clone(),
+            self.key.as_str(),
+            self.uuid.as_str(),
+        )
+        .await?;
+
+        self.is_released = true;
+
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+
+        Ok(())
+    }
+
+    /// Determines whether the lock is released.
+    #[inline]
+    pub const fn is_released(&self) -> bool {
+        self.is_released
+    }
+}
+
+impl Drop for RWriteLockGuard {
+    #[inline]
+    fn drop(&mut self) {
+        if self.is_released {
+            return;
+        }
+
+        if let Err(error) = self.rlock.request_tx.try_send(Some(ReleaseRequest {
+            key:  ReleaseRequestKey::Write(self.key.clone()),
+            uuid: self.uuid.clone(),
+        })) {
+            if matches!(error, TrySendError::Full(_)) {
+                tracing::warn!(
+                    uuid = %self.uuid,
+                    "the lock release manager is full, the lock will be released after its \
+                     TTL expires"
+                );
+            } else {
+                tracing::warn!(
+                    uuid = %self.uuid,
+                    "cannot send a lock release request: {error}",
+                );
+            }
+        }
+    }
+}
+
+impl RLock {
+    /// Acquires a read (shared) lock with a key.
+    ///
+    /// # Behavior
+    ///
+    /// * Multiple readers can hold the lock on the same key at the same time, while a writer is exclusive.
+    /// * Readers are preferred: a writer may wait indefinitely under a continuous stream of readers, so consider setting a lock timeout on the writer side.
+    /// * The lock is stored as a Redis hash and its scripts write after reading the server time, so Redis 5.0 or later is required.
+    /// * Do not use the same key for a mutex and a read-write lock because their Redis types are different.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use rlock::async_lock::RLock;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let lock = rlock.acquire_read("rlock:example").await.unwrap();
+    ///
+    /// // shared section
+    ///
+    /// // drop(lock);
+    /// # }
+    /// ```
+    #[inline]
+    pub async fn acquire_read(&self, key: impl AsRef<str>) -> Result<RReadLockGuard, AcquireError> {
+        self.acquire_read_with_options(key, AcquireOptions::default()).await
+    }
+
+    /// Acquires a read (shared) lock with a key and options.
+    ///
+    /// See [`RLock::acquire_read`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use std::time::Duration;
+    ///
+    /// use rlock::{AcquireOptions, async_lock::RLock};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let lock = rlock
+    ///     .acquire_read_with_options(
+    ///         "rlock:example",
+    ///         AcquireOptions::builder()
+    ///             .ttl(Duration::from_secs(3))
+    ///             .build()
+    ///             .unwrap(),
+    ///     )
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// // shared section
+    ///
+    /// // drop(lock);
+    /// # }
+    /// ```
+    pub async fn acquire_read_with_options(
+        &self,
+        key: impl AsRef<str>,
+        options: AcquireOptions,
+    ) -> Result<RReadLockGuard, AcquireError> {
+        if self.inner.is_shutdown.load(Ordering::Relaxed) {
+            return Err(AcquireError::Shutdown);
+        }
+
+        let key: &str = key.as_ref();
+        let retry_interval = options.retry_interval();
+        let lock_timeout = options.lock_timeout();
+        let ttl = options.ttl();
+        let renew_interval = options.renew_interval();
+
+        let uuid = Arc::new(Uuid::new_v4().to_string());
+
+        let start_time = Instant::now();
+
+        loop {
+            let result = acquire_read_lock_async(
+                &mut self.inner.connection_manager.clone(),
+                key,
+                uuid.as_ref(),
+                ttl,
+            )
+            .await?;
+
+            if result {
+                break;
+            }
+
+            // a writer holds the lock, so we cannot acquire
+
+            // check lock_timeout
+            if let Some(lock_timeout) = lock_timeout
+                && start_time.elapsed() >= lock_timeout
+            {
+                return Err(AcquireError::LockTimeout);
+            }
+
+            // sleep retry_interval to allow other tasks to run
+            time::sleep(retry_interval).await;
+        }
+
+        let key = Arc::new(String::from(key));
+
+        // a new lock has been created
+
+        let stop_tx = if let Some(renew_interval) = renew_interval {
+            // renew automatically
+            let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+
+            let key = key.clone();
+            let uuid = uuid.clone();
+            let mut connection_manager = self.inner.connection_manager.clone();
+
+            tokio::spawn(async move {
+                tracing::trace!(uuid = %uuid, "spawned a task in order to automatically renew the lock");
+
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => {
+                            tracing::trace!(uuid = %uuid, "a spawned renewal task for the lock is stopped because the lock is being released");
+
+                            break
+                        },
+                        _ = time::sleep(renew_interval.unwrap_or_else(|| ttl / 2)) => {
+                            match renew_read_lock_async(&mut connection_manager, key.as_str(), uuid.as_str(), ttl).await {
+                                Ok(false) => {
+                                    tracing::trace!(uuid = %uuid, "cannot find the lock, close the renewal task");
+                                    break;
+                                }
+                                Ok(true) => {
+                                    tracing::trace!(uuid = %uuid, "renewed the lock");
+
+                                    continue;
+                                }
+                                Err(error) => {
+                                    tracing::error!(uuid = %uuid, "an error occured when renewing the lock: {error}");
+                                    tracing::trace!(uuid = %uuid, "close the renewal task for the lock");
+                                    break;
+                                }
+                            }
+                        },
+                    }
+                }
+            });
+
+            Some(stop_tx)
+        } else {
+            None
+        };
+
+        Ok(RReadLockGuard {
+            rlock: self.clone(),
+            is_released: false,
+            key,
+            uuid,
+            stop_tx,
+        })
+    }
+
+    /// Acquires a write (exclusive) lock with a key.
+    ///
+    /// # Behavior
+    ///
+    /// * A writer excludes other writers and all readers on the same key.
+    /// * Readers are preferred: a writer may wait indefinitely under a continuous stream of readers, so consider setting a lock timeout.
+    /// * The lock is stored as a Redis hash and its scripts write after reading the server time, so Redis 5.0 or later is required.
+    /// * Do not use the same key for a mutex and a read-write lock because their Redis types are different.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use rlock::async_lock::RLock;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let lock = rlock.acquire_write("rlock:example").await.unwrap();
+    ///
+    /// // critial section
+    ///
+    /// // drop(lock);
+    /// # }
+    /// ```
+    #[inline]
+    pub async fn acquire_write(
+        &self,
+        key: impl AsRef<str>,
+    ) -> Result<RWriteLockGuard, AcquireError> {
+        self.acquire_write_with_options(key, AcquireOptions::default()).await
+    }
+
+    /// Acquires a write (exclusive) lock with a key and options.
+    ///
+    /// See [`RLock::acquire_write`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use std::time::Duration;
+    ///
+    /// use rlock::{AcquireOptions, async_lock::RLock};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let lock = rlock
+    ///     .acquire_write_with_options(
+    ///         "rlock:example",
+    ///         AcquireOptions::builder()
+    ///             .lock_timeout(Some(Duration::from_secs(3)))
+    ///             .build()
+    ///             .unwrap(),
+    ///     )
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// // critial section
+    ///
+    /// // drop(lock);
+    /// # }
+    /// ```
+    pub async fn acquire_write_with_options(
+        &self,
+        key: impl AsRef<str>,
+        options: AcquireOptions,
+    ) -> Result<RWriteLockGuard, AcquireError> {
+        if self.inner.is_shutdown.load(Ordering::Relaxed) {
+            return Err(AcquireError::Shutdown);
+        }
+
+        let key: &str = key.as_ref();
+        let retry_interval = options.retry_interval();
+        let lock_timeout = options.lock_timeout();
+        let ttl = options.ttl();
+        let renew_interval = options.renew_interval();
+
+        let uuid = Arc::new(Uuid::new_v4().to_string());
+
+        let start_time = Instant::now();
+
+        loop {
+            let result = acquire_write_lock_async(
+                &mut self.inner.connection_manager.clone(),
+                key,
+                uuid.as_ref(),
+                ttl,
+            )
+            .await?;
+
+            if result {
+                break;
+            }
+
+            // a writer or live readers hold the lock, so we cannot acquire
+
+            // check lock_timeout
+            if let Some(lock_timeout) = lock_timeout
+                && start_time.elapsed() >= lock_timeout
+            {
+                return Err(AcquireError::LockTimeout);
+            }
+
+            // sleep retry_interval to allow other tasks to run
+            time::sleep(retry_interval).await;
+        }
+
+        let key = Arc::new(String::from(key));
+
+        // a new lock has been created
+
+        let stop_tx = if let Some(renew_interval) = renew_interval {
+            // renew automatically
+            let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+
+            let key = key.clone();
+            let uuid = uuid.clone();
+            let mut connection_manager = self.inner.connection_manager.clone();
+
+            tokio::spawn(async move {
+                tracing::trace!(uuid = %uuid, "spawned a task in order to automatically renew the lock");
+
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => {
+                            tracing::trace!(uuid = %uuid, "a spawned renewal task for the lock is stopped because the lock is being released");
+
+                            break
+                        },
+                        _ = time::sleep(renew_interval.unwrap_or_else(|| ttl / 2)) => {
+                            match renew_write_lock_async(&mut connection_manager, key.as_str(), uuid.as_str(), ttl).await {
+                                Ok(false) => {
+                                    tracing::trace!(uuid = %uuid, "cannot find the lock, close the renewal task");
+                                    break;
+                                }
+                                Ok(true) => {
+                                    tracing::trace!(uuid = %uuid, "renewed the lock");
+
+                                    continue;
+                                }
+                                Err(error) => {
+                                    tracing::error!(uuid = %uuid, "an error occured when renewing the lock: {error}");
+                                    tracing::trace!(uuid = %uuid, "close the renewal task for the lock");
+                                    break;
+                                }
+                            }
+                        },
+                    }
+                }
+            });
+
+            Some(stop_tx)
+        } else {
+            None
+        };
+
+        Ok(RWriteLockGuard {
+            rlock: self.clone(),
+            is_released: false,
+            key,
+            uuid,
+            stop_tx,
+        })
+    }
+}

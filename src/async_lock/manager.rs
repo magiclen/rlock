@@ -95,6 +95,38 @@ impl RLock {
                         )
                         .await
                     },
+                    ReleaseRequestKey::Read(key) => {
+                        release_read_lock_async(
+                            &mut connection_manager_for_lock_release,
+                            key.as_str(),
+                            req.uuid.as_str(),
+                        )
+                        .await
+                    },
+                    ReleaseRequestKey::Write(key) => {
+                        release_write_lock_async(
+                            &mut connection_manager_for_lock_release,
+                            key.as_str(),
+                            req.uuid.as_str(),
+                        )
+                        .await
+                    },
+                    ReleaseRequestKey::MultipleRead(key) => {
+                        release_multi_key_read_lock_async(
+                            &mut connection_manager_for_lock_release,
+                            key,
+                            req.uuid.as_str(),
+                        )
+                        .await
+                    },
+                    ReleaseRequestKey::MultipleWrite(key) => {
+                        release_multi_key_write_lock_async(
+                            &mut connection_manager_for_lock_release,
+                            key,
+                            req.uuid.as_str(),
+                        )
+                        .await
+                    },
                 } {
                     tracing::error!(
                         "an error occured when releasing the lock {uuid}: {error}",

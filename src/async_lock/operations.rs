@@ -69,3 +69,139 @@ pub(crate) async fn release_multi_key_lock_async(
 ) -> RedisResult<bool> {
     SCRIPT_RELEASE_MULTI_KEY_LOCK.key(keys).arg(uuid).invoke_async(conn).await
 }
+
+#[inline]
+pub(crate) async fn acquire_read_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    key: &str,
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_ACQUIRE_READ_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke_async(conn).await
+}
+
+#[inline]
+pub(crate) async fn renew_read_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    key: &str,
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_RENEW_READ_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke_async(conn).await
+}
+
+#[inline]
+pub(crate) async fn release_read_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    key: &str,
+    uuid: &str,
+) -> RedisResult<bool> {
+    SCRIPT_RELEASE_READ_LOCK.key(key).arg(uuid).invoke_async(conn).await
+}
+
+#[inline]
+pub(crate) async fn acquire_write_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    key: &str,
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_ACQUIRE_WRITE_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke_async(conn).await
+}
+
+#[inline]
+pub(crate) async fn renew_write_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    key: &str,
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_RENEW_WRITE_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke_async(conn).await
+}
+
+#[inline]
+pub(crate) async fn release_write_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    key: &str,
+    uuid: &str,
+) -> RedisResult<bool> {
+    SCRIPT_RELEASE_WRITE_LOCK.key(key).arg(uuid).invoke_async(conn).await
+}
+
+#[inline]
+pub(crate) async fn acquire_multi_key_read_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    keys: &[String],
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_ACQUIRE_MULTI_KEY_READ_LOCK
+        .key(keys)
+        .arg(uuid)
+        .arg(ttl.as_millis())
+        .invoke_async(conn)
+        .await
+}
+
+#[inline]
+pub(crate) async fn renew_multi_key_read_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    keys: &[String],
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_RENEW_MULTI_KEY_READ_LOCK
+        .key(keys)
+        .arg(uuid)
+        .arg(ttl.as_millis())
+        .invoke_async(conn)
+        .await
+}
+
+#[inline]
+pub(crate) async fn release_multi_key_read_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    keys: &[String],
+    uuid: &str,
+) -> RedisResult<bool> {
+    SCRIPT_RELEASE_MULTI_KEY_READ_LOCK.key(keys).arg(uuid).invoke_async(conn).await
+}
+
+#[inline]
+pub(crate) async fn acquire_multi_key_write_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    keys: &[String],
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_ACQUIRE_MULTI_KEY_WRITE_LOCK
+        .key(keys)
+        .arg(uuid)
+        .arg(ttl.as_millis())
+        .invoke_async(conn)
+        .await
+}
+
+#[inline]
+pub(crate) async fn renew_multi_key_write_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    keys: &[String],
+    uuid: &str,
+    ttl: Duration,
+) -> RedisResult<bool> {
+    SCRIPT_RENEW_MULTI_KEY_WRITE_LOCK
+        .key(keys)
+        .arg(uuid)
+        .arg(ttl.as_millis())
+        .invoke_async(conn)
+        .await
+}
+
+#[inline]
+pub(crate) async fn release_multi_key_write_lock_async(
+    conn: &mut impl aio::ConnectionLike,
+    keys: &[String],
+    uuid: &str,
+) -> RedisResult<bool> {
+    SCRIPT_RELEASE_MULTI_KEY_WRITE_LOCK.key(keys).arg(uuid).invoke_async(conn).await
+}
