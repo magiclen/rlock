@@ -1,189 +1,179 @@
 use std::{
-    fmt::{self, Formatter},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    fmt,
+    sync::{Arc, Mutex},
 };
 
-use educe::Educe;
 use redis::{Client, IntoConnectionInfo, RedisError, aio::ConnectionManager};
-use tokio::{
-    sync::{Mutex, mpsc},
-    task::JoinHandle,
-};
+use tokio::sync::{mpsc, oneshot, watch};
 
-use super::operations::*;
-use crate::release_request::{ReleaseRequest, ReleaseRequestKey};
+use super::operations::release_request;
+use crate::{AcquireError, release_request::ReleaseRequest};
 
 const RECYCLE_CHANNEL_BUFFER: usize = 1024;
 
-#[inline]
-fn fmt_connection_manager(_s: &ConnectionManager, f: &mut Formatter<'_>) -> fmt::Result {
-    f.write_str("ConnectionManager")
+#[derive(Debug)]
+pub(crate) enum ReleaseCommand {
+    Release(ReleaseRequest),
+    Barrier(oneshot::Sender<()>),
 }
 
-#[derive(Educe)]
-#[educe(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownState {
+    Open,
+    Closing,
+    Completed,
+    Failed,
+}
+
+pub(crate) type ReleaseSender = Arc<mpsc::Sender<ReleaseCommand>>;
+
 pub(crate) struct RLockInner {
-    #[educe(Debug(method(fmt_connection_manager)))]
     pub(crate) connection_manager: ConnectionManager,
-    lock_release_manager:          Mutex<Option<JoinHandle<()>>>,
-    pub(crate) is_shutdown:        AtomicBool,
+    pub(crate) admission:          Mutex<Option<ReleaseSender>>,
+    pub(crate) shutdown:           watch::Sender<ShutdownState>,
 }
 
-/// A manager for creating locks in Redis.
+impl fmt::Debug for RLockInner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RLockInner")
+            .field("shutdown", &*self.shutdown.borrow())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A manager for creating Redis lock leases using Tokio.
 #[derive(Debug, Clone)]
 pub struct RLock {
-    pub(crate) request_tx: Arc<mpsc::Sender<Option<ReleaseRequest>>>,
-    pub(crate) inner:      Arc<RLockInner>,
+    pub(crate) inner: Arc<RLockInner>,
 }
 
 impl RLock {
-    /// Initializes a Redis connection manager.
-    ///
-    /// # Behavior
-    ///
-    /// 1. Parsing the input Redis URL (`redis_url`) and building a Redis connection manager.
-    /// 2. Spawning a background task (aka the lock release manager) responsible for handling asynchronous lock release requests.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use rlock::async_lock::RLock;
-    ///
-    /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() {
-    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
-    /// # }
-    /// ```
-    #[inline]
+    /// Connects to Redis and creates a lock manager.
     pub async fn new(redis_url: impl IntoConnectionInfo) -> Result<Self, RedisError> {
         let client = Client::open(redis_url)?;
-        let connection_manager = client.get_connection_manager().await?;
-
-        Self::with_connection_manager(connection_manager).await
+        Self::with_connection_manager(client.get_connection_manager().await?).await
     }
 
-    /// See [`RLock::new`].
+    /// Creates a lock manager using an existing Redis connection manager.
     pub async fn with_connection_manager(
         connection_manager: ConnectionManager,
     ) -> Result<Self, RedisError> {
-        let (request_tx, mut request_rx) =
-            mpsc::channel::<Option<ReleaseRequest>>(RECYCLE_CHANNEL_BUFFER);
-        let mut connection_manager_for_lock_release = connection_manager.clone();
-
-        // background task for releasing locks asynchronously
-        let lock_release_manager = tokio::spawn(async move {
-            tracing::trace!("spawned a task in order to release locks in Redis");
-
-            while let Some(Some(req)) = request_rx.recv().await {
-                if let Err(error) = match &req.key {
-                    ReleaseRequestKey::Single(key) => {
-                        release_lock_async(
-                            &mut connection_manager_for_lock_release,
-                            key.as_str(),
-                            req.uuid.as_str(),
-                        )
-                        .await
+        let (request_tx, mut request_rx) = mpsc::channel(RECYCLE_CHANNEL_BUFFER);
+        let (shutdown, _) = watch::channel(ShutdownState::Open);
+        let mut release_connection = connection_manager.clone();
+        let worker = tokio::spawn(async move {
+            while let Some(command) = request_rx.recv().await {
+                match command {
+                    ReleaseCommand::Release(request) => {
+                        if let Err(error) = release_request(&mut release_connection, &request).await
+                        {
+                            tracing::error!(uuid = %request.uuid, "failed to release a dropped lock: {error}");
+                        }
                     },
-                    ReleaseRequestKey::Multiple(key) => {
-                        release_multi_key_lock_async(
-                            &mut connection_manager_for_lock_release,
-                            key,
-                            req.uuid.as_str(),
-                        )
-                        .await
+                    ReleaseCommand::Barrier(ack) => {
+                        let _ = ack.send(());
                     },
-                    ReleaseRequestKey::Read(key) => {
-                        release_read_lock_async(
-                            &mut connection_manager_for_lock_release,
-                            key.as_str(),
-                            req.uuid.as_str(),
-                        )
-                        .await
-                    },
-                    ReleaseRequestKey::Write(key) => {
-                        release_write_lock_async(
-                            &mut connection_manager_for_lock_release,
-                            key.as_str(),
-                            req.uuid.as_str(),
-                        )
-                        .await
-                    },
-                    ReleaseRequestKey::MultipleRead(key) => {
-                        release_multi_key_read_lock_async(
-                            &mut connection_manager_for_lock_release,
-                            key,
-                            req.uuid.as_str(),
-                        )
-                        .await
-                    },
-                    ReleaseRequestKey::MultipleWrite(key) => {
-                        release_multi_key_write_lock_async(
-                            &mut connection_manager_for_lock_release,
-                            key,
-                            req.uuid.as_str(),
-                        )
-                        .await
-                    },
-                } {
-                    tracing::error!(
-                        "an error occured when releasing the lock {uuid}: {error}",
-                        uuid = req.uuid
-                    );
                 }
+            }
+        });
+        let worker_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            if let Err(error) = worker.await {
+                tracing::error!("the lock release worker stopped unexpectedly: {error}");
+                worker_shutdown.send_if_modified(|state| {
+                    if *state == ShutdownState::Completed {
+                        return false;
+                    }
+                    *state = ShutdownState::Failed;
+                    true
+                });
             }
         });
 
         Ok(Self {
-            request_tx: Arc::new(request_tx),
-            inner:      Arc::new(RLockInner {
+            inner: Arc::new(RLockInner {
                 connection_manager,
-                lock_release_manager: Mutex::new(Some(lock_release_manager)),
-                is_shutdown: AtomicBool::new(false),
+                admission: Mutex::new(Some(Arc::new(request_tx))),
+                shutdown,
             }),
         })
     }
 
-    /// Shuts down the RLock manager.
-    ///
-    /// # Behavior
-    ///
-    /// 1. Marking the manager as shutdown.
-    /// 2. Stopping the lock release manager.
-    /// 3. Waiting for the lock release manager to be stopped.
+    pub(crate) fn admit(&self) -> Result<ReleaseSender, AcquireError> {
+        let admission = self.inner.admission.lock().unwrap();
+        if *self.inner.shutdown.borrow() != ShutdownState::Open {
+            return Err(AcquireError::Shutdown);
+        }
+        admission.as_ref().cloned().ok_or(AcquireError::Shutdown)
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        *self.inner.shutdown.borrow() == ShutdownState::Open
+    }
+
+    /// Stops new acquisitions and waits for previously queued releases to finish.
+    /// Existing guards can still renew and release their leases after this returns.
+    /// Concurrent calls wait for the same shutdown barrier, and cancellation does not stop shutdown.
     ///
     /// # Panics
     ///
-    /// Panics if the lock release manager cannot be stopped normally.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use rlock::async_lock::RLock;
-    ///
-    /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() {
-    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
-    ///
-    /// // do something
-    ///
-    /// rlock.shutdown().await;
-    /// # }
-    /// ```
+    /// Panics if the release worker cannot complete the shutdown barrier.
     pub async fn shutdown(&self) {
-        if self.inner.is_shutdown.swap(true, Ordering::Relaxed) {
-            return;
+        let mut changed = self.inner.shutdown.subscribe();
+        {
+            let mut admission = self.inner.admission.lock().unwrap();
+            if let Some(sender) = admission.take() {
+                self.inner.shutdown.send_if_modified(|state| {
+                    if *state == ShutdownState::Open {
+                        *state = ShutdownState::Closing;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                let completion = self.inner.shutdown.clone();
+                tokio::spawn(async move {
+                    let (ack_tx, ack_rx) = oneshot::channel();
+                    let completed = sender.send(ReleaseCommand::Barrier(ack_tx)).await.is_ok()
+                        && ack_rx.await.is_ok();
+                    completion.send_if_modified(|state| {
+                        if *state == ShutdownState::Failed {
+                            return false;
+                        }
+                        *state = if completed {
+                            ShutdownState::Completed
+                        } else {
+                            ShutdownState::Failed
+                        };
+                        true
+                    });
+                });
+            }
         }
 
-        if let Some(lock_release_manager) = self.inner.lock_release_manager.lock().await.take() {
-            // stop the recv loop
-            self.request_tx.send(None).await.unwrap();
+        loop {
+            let state = *changed.borrow_and_update();
+            match state {
+                ShutdownState::Completed => return,
+                ShutdownState::Failed => {
+                    panic!("the lock release worker could not complete shutdown")
+                },
+                ShutdownState::Open | ShutdownState::Closing => {},
+            }
+            if changed.changed().await.is_err() {
+                panic!("the lock shutdown coordinator stopped unexpectedly");
+            }
+        }
+    }
+}
 
-            lock_release_manager.await.unwrap();
-        } else {
-            unreachable!("a lock manager must be taken");
+pub(crate) async fn wait_for_shutdown(changed: &mut watch::Receiver<ShutdownState>) {
+    loop {
+        if *changed.borrow_and_update() != ShutdownState::Open {
+            return;
+        }
+        if changed.changed().await.is_err() {
+            return;
         }
     }
 }

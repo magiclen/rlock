@@ -1,34 +1,44 @@
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, SyncSender},
     },
-    thread::{self, JoinHandle},
+    thread,
+    time::Duration,
 };
 
 use redis::{Client, IntoConnectionInfo, RedisError};
 
 use super::{
-    operations::*,
+    guard::release_request,
     pool::{ConnectionPool, PoolOptions},
 };
-use crate::release_request::{ReleaseRequest, ReleaseRequestKey};
+use crate::{AcquireError, release_request::ReleaseRequest};
 
 const RECYCLE_CHANNEL_BUFFER: usize = 1024;
 
 #[derive(Debug)]
+pub(crate) enum ReleaseCommand {
+    Release(ReleaseRequest),
+    Barrier(mpsc::Sender<()>),
+}
+
+#[derive(Debug)]
 pub(crate) struct RLockInner {
-    pub(crate) pool:        Arc<ConnectionPool>,
-    lock_release_manager:   Mutex<Option<JoinHandle<()>>>,
-    pub(crate) is_shutdown: AtomicBool,
+    pub(crate) pool:       Arc<ConnectionPool>,
+    pub(crate) release_tx: Mutex<Option<Arc<SyncSender<ReleaseCommand>>>>,
+    is_shutdown:           AtomicBool,
+    shutdown_result:       Mutex<Option<bool>>,
+    shutdown_done:         Condvar,
+    retry_lock:            Mutex<()>,
+    retry_wake:            Condvar,
 }
 
 /// A manager for creating locks in Redis.
 #[derive(Debug, Clone)]
 pub struct RLock {
-    pub(crate) request_tx: Arc<SyncSender<Option<ReleaseRequest>>>,
-    pub(crate) inner:      Arc<RLockInner>,
+    pub(crate) inner: Arc<RLockInner>,
 }
 
 impl RLock {
@@ -85,51 +95,29 @@ impl RLock {
         // open one connection immediately so an unreachable Redis server can be detected here, like the async version does
         drop(pool.checkout()?);
 
-        let (request_tx, request_rx) =
-            mpsc::sync_channel::<Option<ReleaseRequest>>(RECYCLE_CHANNEL_BUFFER);
-        let pool_for_lock_release = pool.clone();
-
-        // background thread for releasing locks asynchronously
-        let lock_release_manager = thread::spawn(move || {
-            tracing::trace!("spawned a thread in order to release locks in Redis");
-
-            while let Ok(Some(req)) = request_rx.recv() {
-                if let Err(error) =
-                    pool_for_lock_release.checkout().and_then(|mut conn| match &req.key {
-                        ReleaseRequestKey::Single(key) => {
-                            release_lock_sync(&mut *conn, key.as_str(), req.uuid.as_str())
-                        },
-                        ReleaseRequestKey::Multiple(key) => {
-                            release_multi_key_lock_sync(&mut *conn, key, req.uuid.as_str())
-                        },
-                        ReleaseRequestKey::Read(key) => {
-                            release_read_lock_sync(&mut *conn, key.as_str(), req.uuid.as_str())
-                        },
-                        ReleaseRequestKey::Write(key) => {
-                            release_write_lock_sync(&mut *conn, key.as_str(), req.uuid.as_str())
-                        },
-                        ReleaseRequestKey::MultipleRead(key) => {
-                            release_multi_key_read_lock_sync(&mut *conn, key, req.uuid.as_str())
-                        },
-                        ReleaseRequestKey::MultipleWrite(key) => {
-                            release_multi_key_write_lock_sync(&mut *conn, key, req.uuid.as_str())
-                        },
-                    })
-                {
-                    tracing::error!(
-                        "an error occured when releasing the lock {uuid}: {error}",
-                        uuid = req.uuid
-                    );
+        let (request_tx, request_rx) = mpsc::sync_channel(RECYCLE_CHANNEL_BUFFER);
+        let pool_for_release = pool.clone();
+        thread::Builder::new().name("rlock-release".into()).spawn(move || {
+            while let Ok(command) = request_rx.recv() {
+                match command {
+                    ReleaseCommand::Release(request) => {
+                        if let Err(error) = release_request(&pool_for_release, &request) {
+                            tracing::error!(uuid = %request.uuid, "cannot release the lock: {error}");
+                        }
+                    },
+                    ReleaseCommand::Barrier(ack) => { let _ = ack.send(()); },
                 }
             }
-        });
-
+        }).map_err(RedisError::from)?;
         Ok(Self {
-            request_tx: Arc::new(request_tx),
-            inner:      Arc::new(RLockInner {
+            inner: Arc::new(RLockInner {
                 pool,
-                lock_release_manager: Mutex::new(Some(lock_release_manager)),
+                release_tx: Mutex::new(Some(Arc::new(request_tx))),
                 is_shutdown: AtomicBool::new(false),
+                shutdown_result: Mutex::new(None),
+                shutdown_done: Condvar::new(),
+                retry_lock: Mutex::new(()),
+                retry_wake: Condvar::new(),
             }),
         })
     }
@@ -138,9 +126,9 @@ impl RLock {
     ///
     /// # Behavior
     ///
-    /// 1. Marking the manager as shutdown.
-    /// 2. Stopping the lock release manager.
-    /// 3. Waiting for the lock release manager to be stopped.
+    /// Stops new acquisitions and waits for release requests already in the queue.
+    /// Existing guards can still renew and release their leases; the release thread ends after its last sender is dropped.
+    /// Concurrent calls wait for the same queue barrier.
     ///
     /// # Panics
     ///
@@ -158,17 +146,57 @@ impl RLock {
     /// rlock.shutdown();
     /// ```
     pub fn shutdown(&self) {
-        if self.inner.is_shutdown.swap(true, Ordering::Relaxed) {
-            return;
+        let sender = {
+            let mut sender = self.inner.release_tx.lock().unwrap();
+            let sender = sender.take();
+            self.inner.is_shutdown.store(true, Ordering::Release);
+            sender
+        };
+        {
+            let _retry = self.inner.retry_lock.lock().unwrap();
+            self.inner.retry_wake.notify_all();
         }
-
-        if let Some(lock_release_manager) = self.inner.lock_release_manager.lock().unwrap().take() {
-            // stop the recv loop
-            self.request_tx.send(None).unwrap();
-
-            lock_release_manager.join().unwrap();
-        } else {
-            unreachable!("a lock manager must be taken");
+        if let Some(sender) = sender {
+            let (ack_tx, ack_rx) = mpsc::channel();
+            let complete =
+                sender.send(ReleaseCommand::Barrier(ack_tx)).is_ok() && ack_rx.recv().is_ok();
+            *self.inner.shutdown_result.lock().unwrap() = Some(complete);
+            self.inner.shutdown_done.notify_all();
         }
+        let mut result = self.inner.shutdown_result.lock().unwrap();
+        while result.is_none() {
+            result = self.inner.shutdown_done.wait(result).unwrap();
+        }
+        assert_eq!(
+            Some(true),
+            *result,
+            "the lock release manager stopped before the shutdown barrier"
+        );
+    }
+
+    pub(crate) fn admit(&self) -> Result<Arc<SyncSender<ReleaseCommand>>, AcquireError> {
+        self.inner.release_tx.lock().unwrap().as_ref().cloned().ok_or(AcquireError::Shutdown)
+    }
+
+    pub(crate) fn is_shutdown(&self) -> bool {
+        self.inner.is_shutdown.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn wait_retry(&self, wait: Duration, canceled: &AtomicBool) {
+        let lock = self.inner.retry_lock.lock().unwrap();
+        drop(
+            self.inner
+                .retry_wake
+                .wait_timeout_while(lock, wait, |_| {
+                    !self.is_shutdown() && !canceled.load(Ordering::Acquire)
+                })
+                .unwrap(),
+        );
+    }
+
+    pub(crate) fn cancel_acquisition(&self, canceled: &AtomicBool) {
+        let _lock = self.inner.retry_lock.lock().unwrap();
+        canceled.store(true, Ordering::Release);
+        self.inner.retry_wake.notify_all();
     }
 }

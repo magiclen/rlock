@@ -60,6 +60,8 @@ impl Error for AcquireError {
 pub enum ReleaseError {
     /// Error that occurred when interacting with Redis.
     RedisError(RedisError),
+    /// A lock worker stopped before returning a release result.
+    WorkerError(io::Error),
 }
 
 impl From<RedisError> for ReleaseError {
@@ -74,6 +76,7 @@ impl Display for ReleaseError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::RedisError(error) => Display::fmt(error, f),
+            Self::WorkerError(error) => Display::fmt(error, f),
         }
     }
 }
@@ -82,6 +85,7 @@ impl Error for ReleaseError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::RedisError(error) => Some(error),
+            Self::WorkerError(error) => Some(error),
         }
     }
 }

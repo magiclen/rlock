@@ -543,3 +543,110 @@ fn test_multi_key_mutex_critical_section() {
 
     rlock.shutdown();
 }
+
+#[test]
+fn test_lease_renewal_and_shutdown_with_live_guard() {
+    use crate::LeaseState;
+    let rlock = RLock::new(REDIS_URL.as_str()).unwrap();
+    let mut guard = rlock
+        .acquire_mutex_with_options(
+            "test:sync_live_shutdown",
+            AcquireOptions::builder().ttl(Duration::from_millis(300)).build().unwrap(),
+        )
+        .unwrap();
+    rlock.shutdown();
+    thread::sleep(Duration::from_millis(800));
+    assert_eq!(LeaseState::Active, guard.lease_state());
+    assert!(matches!(rlock.acquire_mutex("test:sync_closed"), Err(AcquireError::Shutdown)));
+    guard.release().unwrap();
+    assert_eq!(LeaseState::Released, guard.lease_state());
+    assert!(guard.is_released());
+    rlock.shutdown();
+}
+
+#[test]
+fn test_disabled_renewal_expires() {
+    use crate::{LeaseState, RenewalMode};
+    let rlock = RLock::new(REDIS_URL.as_str()).unwrap();
+    let mut guard = rlock
+        .acquire_read_with_options(
+            "test:sync_no_renewal",
+            AcquireOptions::builder()
+                .ttl(Duration::from_millis(150))
+                .renewal_mode(RenewalMode::Disabled)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    thread::sleep(Duration::from_millis(250));
+    assert_eq!(LeaseState::Lost, guard.lease_state());
+    guard.release().unwrap();
+    rlock.shutdown();
+}
+
+#[test]
+fn test_try_acquisition_and_reusable_keys() {
+    use crate::LockKeys;
+    let rlock = RLock::new(REDIS_URL.as_str()).unwrap();
+    let mut mutex = rlock.try_acquire_mutex("test:sync_try_mutex").unwrap().unwrap();
+    assert!(rlock.try_acquire_mutex("test:sync_try_mutex").unwrap().is_none());
+    mutex.release().unwrap();
+    let keys = LockKeys::new(["test:sync_try:a", "test:sync_try:b"]).unwrap();
+    let mut read = rlock.try_acquire_multi_key_read(&keys).unwrap().unwrap();
+    let mut other = rlock.try_acquire_read("test:sync_try:a").unwrap().unwrap();
+    assert!(rlock.try_acquire_multi_key_write(&keys).unwrap().is_none());
+    other.release().unwrap();
+    read.release().unwrap();
+    let mut write = rlock.try_acquire_multi_key_write(&keys).unwrap().unwrap();
+    assert!(rlock.try_acquire_write("test:sync_try:a").unwrap().is_none());
+    assert!(rlock.try_acquire_multi_key_read(&keys).unwrap().is_none());
+    write.release().unwrap();
+    let mut multi = rlock.try_acquire_multi_key_mutex(&keys).unwrap().unwrap();
+    assert!(rlock.try_acquire_mutex("test:sync_try:a").unwrap().is_none());
+    multi.release().unwrap();
+    let options = AcquireOptions::builder().lock_timeout(Some(Duration::ZERO)).build().unwrap();
+    assert!(matches!(
+        rlock.try_acquire_mutex_with_options("test:sync_zero", options),
+        Err(AcquireError::LockTimeout)
+    ));
+    rlock.shutdown();
+}
+
+#[test]
+fn test_deadline_cleans_up_late_success() {
+    use crate::test_proxy::{TestProxy, assert_key_released};
+    let proxy = TestProxy::new();
+    let rlock = RLock::new(proxy.url.as_str()).unwrap();
+    let key = "test:sync_late_deadline";
+    proxy.arm("SET", key);
+    let start = std::time::Instant::now();
+    let result = rlock.acquire_mutex_with_options(
+        key,
+        AcquireOptions::builder().lock_timeout(Some(Duration::from_millis(200))).build().unwrap(),
+    );
+    assert!(matches!(result, Err(AcquireError::LockTimeout)));
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert!(proxy.is_blocked());
+    proxy.resume();
+    assert_key_released(key);
+    rlock.shutdown();
+}
+
+#[test]
+fn test_retry_wait_does_not_exceed_deadline() {
+    let rlock = RLock::new(REDIS_URL.as_str()).unwrap();
+    let mut guard = rlock.acquire_mutex("test:sync_retry_deadline").unwrap();
+    let start = std::time::Instant::now();
+    let result = rlock.acquire_mutex_with_options(
+        "test:sync_retry_deadline",
+        AcquireOptions::builder()
+            .retry_interval(Duration::from_secs(2))
+            .lock_timeout(Some(Duration::from_millis(100)))
+            .build()
+            .unwrap(),
+    );
+    assert!(matches!(result, Err(AcquireError::LockTimeout)));
+    assert!(start.elapsed() < Duration::from_secs(1));
+    guard.release().unwrap();
+    rlock.shutdown();
+}

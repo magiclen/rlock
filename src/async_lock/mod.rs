@@ -1,3 +1,4 @@
+mod guard;
 mod lock;
 mod manager;
 mod multi_key_lock;

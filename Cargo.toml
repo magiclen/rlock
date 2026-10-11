@@ -19,7 +19,7 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 tracing = { version = "0.1.6", optional = true }
 
 # async
-tokio = { version = "1.6", optional = true, default-features = false, features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1.19", optional = true, default-features = false, features = ["macros", "rt", "sync", "time"] }
 educe = { version = "0.7.3", optional = true, default-features = false, features = ["Debug"] }
 
 [dev-dependencies]

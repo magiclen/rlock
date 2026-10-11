@@ -538,3 +538,237 @@ async fn test_multi_key_mutex_critical_section() {
 
     rlock.shutdown().await;
 }
+
+#[tokio::test]
+async fn test_lease_renewal_and_shutdown_with_live_guard() {
+    use crate::LeaseState;
+    let rlock = RLock::new(REDIS_URL.as_str()).await.unwrap();
+    let mut guard = rlock
+        .acquire_mutex_with_options(
+            "test:async_live_shutdown",
+            AcquireOptions::builder().ttl(Duration::from_millis(300)).build().unwrap(),
+        )
+        .await
+        .unwrap();
+    rlock.shutdown().await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(LeaseState::Active, guard.lease_state());
+    assert!(matches!(rlock.acquire_mutex("test:async_closed").await, Err(AcquireError::Shutdown)));
+    guard.release().await.unwrap();
+    assert_eq!(LeaseState::Released, guard.wait_until_inactive().await);
+    assert!(guard.is_released());
+    rlock.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_disabled_renewal_expires() {
+    use crate::{LeaseState, RenewalMode};
+    let rlock = RLock::new(REDIS_URL.as_str()).await.unwrap();
+    let mut guard = rlock
+        .acquire_read_with_options(
+            "test:async_no_renewal",
+            AcquireOptions::builder()
+                .ttl(Duration::from_millis(150))
+                .renewal_mode(RenewalMode::Disabled)
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        LeaseState::Lost,
+        tokio::time::timeout(Duration::from_secs(2), guard.wait_until_inactive()).await.unwrap()
+    );
+    assert!(!guard.is_released());
+    guard.release().await.unwrap();
+    rlock.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_try_acquisition_and_reusable_keys() {
+    use crate::LockKeys;
+    let rlock = RLock::new(REDIS_URL.as_str()).await.unwrap();
+    let mut mutex = rlock.try_acquire_mutex("test:async_try_mutex").await.unwrap().unwrap();
+    assert!(rlock.try_acquire_mutex("test:async_try_mutex").await.unwrap().is_none());
+    mutex.release().await.unwrap();
+    let keys = LockKeys::new(["test:async_try:a", "test:async_try:b"]).unwrap();
+    let mut read = rlock.try_acquire_multi_key_read(&keys).await.unwrap().unwrap();
+    let mut other = rlock.try_acquire_read("test:async_try:a").await.unwrap().unwrap();
+    assert!(rlock.try_acquire_multi_key_write(&keys).await.unwrap().is_none());
+    other.release().await.unwrap();
+    read.release().await.unwrap();
+    let mut write = rlock.try_acquire_multi_key_write(&keys).await.unwrap().unwrap();
+    assert!(rlock.try_acquire_write("test:async_try:a").await.unwrap().is_none());
+    assert!(rlock.try_acquire_multi_key_read(&keys).await.unwrap().is_none());
+    write.release().await.unwrap();
+    let mut multi = rlock.try_acquire_multi_key_mutex(&keys).await.unwrap().unwrap();
+    assert!(rlock.try_acquire_mutex("test:async_try:a").await.unwrap().is_none());
+    multi.release().await.unwrap();
+    let options = AcquireOptions::builder().lock_timeout(Some(Duration::ZERO)).build().unwrap();
+    assert!(matches!(
+        rlock.try_acquire_mutex_with_options("test:async_zero", options).await,
+        Err(AcquireError::LockTimeout)
+    ));
+    rlock.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_canceled_acquisition_is_cleaned_up() {
+    use crate::test_proxy::{TestProxy, assert_key_released};
+    let proxy = TestProxy::new();
+    let rlock = RLock::new(proxy.url.as_str()).await.unwrap();
+    let key = "test:async_canceled_acquisition";
+    proxy.arm("SET", key);
+    let manager = rlock.clone();
+    let task = tokio::spawn(async move { manager.acquire_mutex(key).await });
+    proxy.wait_blocked().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    proxy.resume();
+    tokio::task::spawn_blocking(move || assert_key_released(key)).await.unwrap();
+    rlock.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_deadline_cleans_up_late_success() {
+    use crate::test_proxy::{TestProxy, assert_key_released};
+    let proxy = TestProxy::new();
+    let rlock = RLock::new(proxy.url.as_str()).await.unwrap();
+    let key = "test:async_late_deadline";
+    proxy.arm("SET", key);
+    let manager = rlock.clone();
+    let task = tokio::spawn(async move {
+        manager
+            .acquire_mutex_with_options(
+                key,
+                AcquireOptions::builder()
+                    .lock_timeout(Some(Duration::from_millis(200)))
+                    .build()
+                    .unwrap(),
+            )
+            .await
+    });
+    proxy.wait_blocked().await;
+    assert!(matches!(task.await.unwrap(), Err(AcquireError::LockTimeout)));
+    proxy.resume();
+    tokio::task::spawn_blocking(move || assert_key_released(key)).await.unwrap();
+    rlock.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_late_lease_does_not_remove_new_owner() {
+    use crate::{RenewalMode, test_proxy::TestProxy};
+    let proxy = TestProxy::new();
+    let rlock = RLock::new(proxy.url.as_str()).await.unwrap();
+    let key = "test:async_late_lease";
+    proxy.arm("SET", key);
+    let manager = rlock.clone();
+    let task = tokio::spawn(async move {
+        manager
+            .acquire_mutex_with_options(
+                key,
+                AcquireOptions::builder()
+                    .ttl(Duration::from_millis(150))
+                    .renewal_mode(RenewalMode::Disabled)
+                    .build()
+                    .unwrap(),
+            )
+            .await
+    });
+    proxy.wait_blocked().await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let mut conn = redis::Client::open(REDIS_URL.as_str()).unwrap().get_connection().unwrap();
+    assert_eq!(
+        Some(String::from("OK")),
+        redis::cmd("SET")
+            .arg(key)
+            .arg("new-owner")
+            .arg("NX")
+            .arg("PX")
+            .arg(2000)
+            .query::<Option<String>>(&mut conn)
+            .unwrap()
+    );
+    proxy.resume();
+    assert!(matches!(task.await.unwrap(), Err(AcquireError::LeaseExpired)));
+    assert_eq!("new-owner", redis::cmd("GET").arg(key).query::<String>(&mut conn).unwrap());
+    redis::cmd("DEL").arg(key).exec(&mut conn).unwrap();
+    rlock.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_canceled_release_is_inactive_and_can_retry() {
+    use crate::{LeaseState, RenewalMode, test_proxy::TestProxy};
+    let proxy = TestProxy::new();
+    let rlock = RLock::new(proxy.url.as_str()).await.unwrap();
+    let key = "test:async_canceled_release";
+    let mut guard = rlock
+        .acquire_mutex_with_options(
+            key,
+            AcquireOptions::builder().renewal_mode(RenewalMode::Disabled).build().unwrap(),
+        )
+        .await
+        .unwrap();
+    proxy.arm("EVALSHA", key);
+    {
+        let releasing = guard.release();
+        tokio::pin!(releasing);
+        tokio::select! {
+            _ = proxy.wait_blocked() => {},
+            result = &mut releasing => panic!("release completed before its reply was resumed: {result:?}"),
+        }
+    }
+    assert!(proxy.is_blocked());
+    assert_eq!(LeaseState::Lost, guard.lease_state());
+    assert!(!guard.is_released());
+    proxy.resume();
+    guard.release().await.unwrap();
+    assert_eq!(LeaseState::Released, guard.lease_state());
+    rlock.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_canceled_and_concurrent_shutdown_share_barrier() {
+    use crate::test_proxy::TestProxy;
+    let proxy = TestProxy::new();
+    let rlock = RLock::new(proxy.url.as_str()).await.unwrap();
+    let key = "test:async_shutdown_barrier";
+    let guard = rlock.acquire_mutex(key).await.unwrap();
+    proxy.arm("EVALSHA", key);
+    drop(guard);
+    proxy.wait_blocked().await;
+    assert!(tokio::time::timeout(Duration::from_millis(50), rlock.shutdown()).await.is_err());
+    assert!(tokio::time::timeout(Duration::from_millis(50), rlock.shutdown()).await.is_err());
+    proxy.resume();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(rlock.shutdown(), rlock.shutdown());
+    })
+    .await
+    .unwrap();
+}
+
+#[cfg(feature = "sync")]
+#[tokio::test]
+async fn test_sync_async_interoperability() {
+    let asynchronous = RLock::new(REDIS_URL.as_str()).await.unwrap();
+    let synchronous = crate::sync_lock::RLock::new(REDIS_URL.as_str()).unwrap();
+    let key = "test:sync_async_mutex";
+    let mut mutex = synchronous.acquire_mutex(key).unwrap();
+    assert!(asynchronous.try_acquire_mutex(key).await.unwrap().is_none());
+    mutex.release().unwrap();
+    let mut mutex = asynchronous.try_acquire_mutex(key).await.unwrap().unwrap();
+    assert!(synchronous.try_acquire_mutex(key).unwrap().is_none());
+    mutex.release().await.unwrap();
+    let key = "test:sync_async_rw";
+    let mut reader = synchronous.acquire_read(key).unwrap();
+    let mut other = asynchronous.try_acquire_read(key).await.unwrap().unwrap();
+    assert!(asynchronous.try_acquire_write(key).await.unwrap().is_none());
+    reader.release().unwrap();
+    assert!(synchronous.try_acquire_write(key).unwrap().is_none());
+    other.release().await.unwrap();
+    let mut writer = synchronous.try_acquire_write(key).unwrap().unwrap();
+    assert!(asynchronous.try_acquire_read(key).await.unwrap().is_none());
+    writer.release().unwrap();
+    synchronous.shutdown();
+    asynchronous.shutdown().await;
+}

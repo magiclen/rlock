@@ -1,256 +1,47 @@
-#[cfg(debug_assertions)]
-use std::collections::HashSet;
-use std::{
-    sync::{Arc, atomic::Ordering},
-    time::Instant,
-};
+use std::sync::Arc;
 
-use tokio::{
-    sync::{mpsc::error::TrySendError, oneshot},
-    time,
-};
-use uuid::Uuid;
-
-use super::{RLock, operations::*};
+use super::{RLock, guard::GuardData};
 use crate::{
-    AcquireError, AcquireOptions, ReleaseError,
-    release_request::{ReleaseRequest, ReleaseRequestKey},
+    AcquireError, AcquireOptions, LeaseState, ReleaseError, release_request::ReleaseRequestKey,
 };
 
-/// A guard object representing an acquired Redis read lock (multi-key).
-///
-/// # Behavior
-///
-/// * Multiple read guards can hold the same keys at the same time, while a writer is excluded until all live readers are gone.
-/// * Dropping the guard automatically releases the lock unless the buffer of the lock release manager is full (in that case, the lock is released after its TTL expires in Redis)
-/// * If the renewal interval is not set to `None`, a background task (aka the renewal task) is spawned to extend the lock's TTL. The task is terminated when the lock is released.
+/// A guard for an acquired Redis multi-key read lease.
+/// Dropping the guard stops renewal and queues release, with TTL expiry as a fallback if the queue is unavailable.
+/// A guard may outlive its lease, so use `lease_state` or `wait_until_inactive` to observe loss.
 #[derive(Debug)]
 #[must_use = "Keep this guard alive while using the protected resource."]
 pub struct RMultiKeyReadLockGuard {
-    rlock:       RLock,
-    is_released: bool,
-    keys:        Arc<Vec<String>>,
-    uuid:        Arc<String>,
-    stop_tx:     Option<oneshot::Sender<()>>,
+    data: GuardData,
 }
 
 impl RMultiKeyReadLockGuard {
-    /// Releases the lock. If the lock is released, returns `Ok(())`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use std::sync::Arc;
-    ///
-    /// use rlock::async_lock::RLock;
-    ///
-    /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() {
-    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
-    ///
-    /// let mut lock = rlock
-    ///     .acquire_multi_key_read(Arc::new(vec![
-    ///         String::from("rlock:example"),
-    ///         String::from("rlock:example2"),
-    ///     ]))
-    ///     .await
-    ///     .unwrap();
-    ///
-    /// // shared section
-    ///
-    /// lock.release().await.unwrap();
-    /// # }
-    /// ```
-    #[inline]
+    /// Releases the lease and waits for the Redis operation to complete.
+    /// Starting release stops renewal and marks the lease lost until release completes.
+    /// Cancellation or an error leaves the guard lost and allows release to be retried.
     pub async fn release(&mut self) -> Result<(), ReleaseError> {
-        if self.is_released {
-            return Ok(());
-        }
-
-        release_multi_key_read_lock_async(
-            &mut self.rlock.inner.connection_manager.clone(),
-            &self.keys,
-            self.uuid.as_str(),
-        )
-        .await?;
-
-        self.is_released = true;
-
-        if let Some(stop_tx) = self.stop_tx.take() {
-            let _ = stop_tx.send(());
-        }
-
-        Ok(())
+        self.data.release().await
     }
 
-    /// Determines whether the lock is released.
-    #[inline]
+    /// Returns whether explicit release completed successfully.
+    /// This does not indicate whether an unreleased lease is still active.
     pub const fn is_released(&self) -> bool {
-        self.is_released
-    }
-}
-
-impl Drop for RMultiKeyReadLockGuard {
-    #[inline]
-    fn drop(&mut self) {
-        if self.is_released {
-            return;
-        }
-
-        if let Err(error) = self.rlock.request_tx.try_send(Some(ReleaseRequest {
-            key:  ReleaseRequestKey::MultipleRead(self.keys.clone()),
-            uuid: self.uuid.clone(),
-        })) {
-            if matches!(error, TrySendError::Full(_)) {
-                tracing::warn!(
-                    uuid = %self.uuid,
-                    "the lock release manager is full, the lock will be released after its TTL \
-                     expires",
-                );
-            } else {
-                tracing::warn!(
-                    uuid = %self.uuid,
-                    "cannot send a lock release request: {error}",
-                );
-            }
-        }
-    }
-}
-
-/// A guard object representing an acquired Redis write lock (multi-key).
-///
-/// # Behavior
-///
-/// * A write guard is exclusive: it excludes other writers and all readers on the same keys.
-/// * Dropping the guard automatically releases the lock unless the buffer of the lock release manager is full (in that case, the lock is released after its TTL expires in Redis)
-/// * If the renewal interval is not set to `None`, a background task (aka the renewal task) is spawned to extend the lock's TTL. The task is terminated when the lock is released.
-#[derive(Debug)]
-#[must_use = "Keep this guard alive while using the protected resource."]
-pub struct RMultiKeyWriteLockGuard {
-    rlock:       RLock,
-    is_released: bool,
-    keys:        Arc<Vec<String>>,
-    uuid:        Arc<String>,
-    stop_tx:     Option<oneshot::Sender<()>>,
-}
-
-impl RMultiKeyWriteLockGuard {
-    /// Releases the lock. If the lock is released, returns `Ok(())`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use std::sync::Arc;
-    ///
-    /// use rlock::async_lock::RLock;
-    ///
-    /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() {
-    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
-    ///
-    /// let mut lock = rlock
-    ///     .acquire_multi_key_write(Arc::new(vec![
-    ///         String::from("rlock:example"),
-    ///         String::from("rlock:example2"),
-    ///     ]))
-    ///     .await
-    ///     .unwrap();
-    ///
-    /// // critial section
-    ///
-    /// lock.release().await.unwrap();
-    /// # }
-    /// ```
-    #[inline]
-    pub async fn release(&mut self) -> Result<(), ReleaseError> {
-        if self.is_released {
-            return Ok(());
-        }
-
-        release_multi_key_write_lock_async(
-            &mut self.rlock.inner.connection_manager.clone(),
-            &self.keys,
-            self.uuid.as_str(),
-        )
-        .await?;
-
-        self.is_released = true;
-
-        if let Some(stop_tx) = self.stop_tx.take() {
-            let _ = stop_tx.send(());
-        }
-
-        Ok(())
+        self.data.is_released
     }
 
-    /// Determines whether the lock is released.
-    #[inline]
-    pub const fn is_released(&self) -> bool {
-        self.is_released
+    /// Returns the local lease state using its conservative deadline.
+    pub fn lease_state(&self) -> LeaseState {
+        self.data.lease.state()
     }
-}
 
-impl Drop for RMultiKeyWriteLockGuard {
-    #[inline]
-    fn drop(&mut self) {
-        if self.is_released {
-            return;
-        }
-
-        if let Err(error) = self.rlock.request_tx.try_send(Some(ReleaseRequest {
-            key:  ReleaseRequestKey::MultipleWrite(self.keys.clone()),
-            uuid: self.uuid.clone(),
-        })) {
-            if matches!(error, TrySendError::Full(_)) {
-                tracing::warn!(
-                    uuid = %self.uuid,
-                    "the lock release manager is full, the lock will be released after its TTL \
-                     expires",
-                );
-            } else {
-                tracing::warn!(
-                    uuid = %self.uuid,
-                    "cannot send a lock release request: {error}",
-                );
-            }
-        }
+    /// Waits until the lease is lost or released, including when renewal is disabled.
+    pub async fn wait_until_inactive(&self) -> LeaseState {
+        self.data.lease.wait_until_inactive().await
     }
 }
 
 impl RLock {
-    /// Acquires a read (shared) lock with mutiple keys.
-    ///
-    /// The key list must not be empty and each key must be unique.
-    /// Debug builds assert these programmer invariants.
-    /// Release builds skip these checks for performance because callers are expected to pass keys chosen by the program rather than direct user input.
-    ///
-    /// See [`RLock::acquire_read`] for the behavior of read locks.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use std::sync::Arc;
-    ///
-    /// use rlock::async_lock::RLock;
-    ///
-    /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() {
-    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
-    ///
-    /// let lock = rlock
-    ///     .acquire_multi_key_read(Arc::new(vec![
-    ///         String::from("rlock:example"),
-    ///         String::from("rlock:example2"),
-    ///     ]))
-    ///     .await
-    ///     .unwrap();
-    ///
-    /// // shared section
-    ///
-    /// // drop(lock);
-    /// # }
-    /// ```
-    #[inline]
+    /// Acquires a multi-key read lease with the default options.
+    /// The keys must be nonempty and unique, which debug builds assert.
     pub async fn acquire_multi_key_read(
         &self,
         keys: impl Into<Arc<Vec<String>>>,
@@ -258,189 +49,106 @@ impl RLock {
         self.acquire_multi_key_read_with_options(keys, AcquireOptions::default()).await
     }
 
-    /// Acquires a read (shared) lock with mutiple keys and options.
-    ///
-    /// See [`RLock::acquire_multi_key_read`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use std::{sync::Arc, time::Duration};
-    ///
-    /// use rlock::{AcquireOptions, async_lock::RLock};
-    ///
-    /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() {
-    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
-    ///
-    /// let lock = rlock
-    ///     .acquire_multi_key_read_with_options(
-    ///         Arc::new(vec![
-    ///             String::from("rlock:example"),
-    ///             String::from("rlock:example2"),
-    ///         ]),
-    ///         AcquireOptions::builder()
-    ///             .ttl(Duration::from_secs(3))
-    ///             .build()
-    ///             .unwrap(),
-    ///     )
-    ///     .await
-    ///     .unwrap();
-    ///
-    /// // shared section
-    ///
-    /// // drop(lock);
-    /// # }
-    /// ```
+    /// Acquires the lease using the supplied options.
+    /// A lock timeout covers the complete wait, including Redis I/O, and a zero timeout sends no command.
+    /// Cancelling the wait retains cleanup responsibility for an in-flight acquisition.
+    /// The keys must be nonempty and unique, which debug builds assert.
     pub async fn acquire_multi_key_read_with_options(
         &self,
         keys: impl Into<Arc<Vec<String>>>,
         options: AcquireOptions,
     ) -> Result<RMultiKeyReadLockGuard, AcquireError> {
-        if self.inner.is_shutdown.load(Ordering::Relaxed) {
-            return Err(AcquireError::Shutdown);
-        }
-
         let keys = keys.into();
-
         #[cfg(debug_assertions)]
         {
-            debug_assert!(!keys.is_empty(), "multi-key read lock requires at least one key");
-
-            let mut unique_keys = HashSet::with_capacity(keys.len());
-
+            let mut unique = std::collections::HashSet::with_capacity(keys.len());
+            debug_assert!(!keys.is_empty(), "multi-key locks require at least one key");
             for key in keys.iter() {
-                debug_assert!(
-                    unique_keys.insert(key.as_str()),
-                    "multi-key read lock requires unique keys"
-                );
+                debug_assert!(unique.insert(key.as_str()), "multi-key locks require unique keys");
             }
         }
-
-        let retry_interval = options.retry_interval();
-        let lock_timeout = options.lock_timeout();
-        let ttl = options.effective_ttl();
-        let renew_interval = options.effective_renew_interval().map(Some);
-
-        let uuid = Arc::new(Uuid::new_v4().to_string());
-
-        let start_time = Instant::now();
-
-        loop {
-            let result = acquire_multi_key_read_lock_async(
-                &mut self.inner.connection_manager.clone(),
-                &keys,
-                uuid.as_ref(),
-                ttl,
-            )
-            .await?;
-
-            if result {
-                break;
-            }
-
-            // a writer holds the lock, so we cannot acquire
-
-            // check lock_timeout
-            if let Some(lock_timeout) = lock_timeout
-                && start_time.elapsed() >= lock_timeout
-            {
-                return Err(AcquireError::LockTimeout);
-            }
-
-            // sleep retry_interval to allow other tasks to run
-            time::sleep(retry_interval).await;
-        }
-
-        // a new lock has been created
-
-        let stop_tx = if let Some(renew_interval) = renew_interval {
-            // renew automatically
-            let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
-
-            let keys = keys.clone();
-            let uuid = uuid.clone();
-            let mut connection_manager = self.inner.connection_manager.clone();
-
-            tokio::spawn(async move {
-                tracing::trace!(uuid = %uuid, "spawned a task in order to automatically renew the lock");
-
-                loop {
-                    tokio::select! {
-                        _ = &mut stop_rx => {
-                            tracing::trace!(uuid = %uuid, "a spawned renewal task for the lock is stopped because the lock is being released");
-
-                            break
-                        },
-                        _ = time::sleep(renew_interval.unwrap_or_else(|| ttl / 2)) => {
-                            match renew_multi_key_read_lock_async(&mut connection_manager, &keys, uuid.as_str(), ttl).await {
-                                Ok(false) => {
-                                    tracing::trace!(uuid = %uuid, "cannot find the lock, close the renewal task");
-                                    break;
-                                }
-                                Ok(true) => {
-                                    tracing::trace!(uuid = %uuid, "renewed the lock");
-
-                                    continue;
-                                }
-                                Err(error) => {
-                                    tracing::error!(uuid = %uuid, "an error occured when renewing the lock: {error}");
-                                    tracing::trace!(uuid = %uuid, "close the renewal task for the lock");
-                                    break;
-                                }
-                            }
-                        },
-                    }
-                }
-            });
-
-            Some(stop_tx)
-        } else {
-            None
-        };
-
+        let result =
+            self.acquire_internal(ReleaseRequestKey::MultipleRead(keys), options, false).await?;
         Ok(RMultiKeyReadLockGuard {
-            rlock: self.clone(),
-            is_released: false,
-            keys,
-            uuid,
-            stop_tx,
+            data: result.expect("retrying acquisition returns a guard")
         })
     }
 
-    /// Acquires a write (exclusive) lock with mutiple keys.
-    ///
-    /// The key list must not be empty and each key must be unique.
-    /// Debug builds assert these programmer invariants.
-    /// Release builds skip these checks for performance because callers are expected to pass keys chosen by the program rather than direct user input.
-    ///
-    /// See [`RLock::acquire_write`] for the behavior of write locks.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use std::sync::Arc;
-    ///
-    /// use rlock::async_lock::RLock;
-    ///
-    /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() {
-    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
-    ///
-    /// let lock = rlock
-    ///     .acquire_multi_key_write(Arc::new(vec![
-    ///         String::from("rlock:example"),
-    ///         String::from("rlock:example2"),
-    ///     ]))
-    ///     .await
-    ///     .unwrap();
-    ///
-    /// // critial section
-    ///
-    /// // drop(lock);
-    /// # }
-    /// ```
-    #[inline]
+    /// Attempts to acquire a multi-key read lease without retrying contention.
+    /// Returns `Ok(None)` when another holder prevents acquisition.
+    /// The keys must be nonempty and unique, which debug builds assert.
+    pub async fn try_acquire_multi_key_read(
+        &self,
+        keys: impl Into<Arc<Vec<String>>>,
+    ) -> Result<Option<RMultiKeyReadLockGuard>, AcquireError> {
+        self.try_acquire_multi_key_read_with_options(keys, AcquireOptions::default()).await
+    }
+
+    /// Attempts one acquisition using the supplied options.
+    /// A lock timeout covers the complete wait, including Redis I/O, and a zero timeout sends no command.
+    /// Cancelling the wait retains cleanup responsibility for an in-flight acquisition.
+    /// The keys must be nonempty and unique, which debug builds assert.
+    /// Contention returns `Ok(None)`, while Redis failures and timeouts return an error.
+    pub async fn try_acquire_multi_key_read_with_options(
+        &self,
+        keys: impl Into<Arc<Vec<String>>>,
+        options: AcquireOptions,
+    ) -> Result<Option<RMultiKeyReadLockGuard>, AcquireError> {
+        let keys = keys.into();
+        #[cfg(debug_assertions)]
+        {
+            let mut unique = std::collections::HashSet::with_capacity(keys.len());
+            debug_assert!(!keys.is_empty(), "multi-key locks require at least one key");
+            for key in keys.iter() {
+                debug_assert!(unique.insert(key.as_str()), "multi-key locks require unique keys");
+            }
+        }
+        let result =
+            self.acquire_internal(ReleaseRequestKey::MultipleRead(keys), options, true).await?;
+        Ok(result.map(|data| RMultiKeyReadLockGuard {
+            data,
+        }))
+    }
+}
+
+/// A guard for an acquired Redis multi-key write lease.
+/// Dropping the guard stops renewal and queues release, with TTL expiry as a fallback if the queue is unavailable.
+/// A guard may outlive its lease, so use `lease_state` or `wait_until_inactive` to observe loss.
+#[derive(Debug)]
+#[must_use = "Keep this guard alive while using the protected resource."]
+pub struct RMultiKeyWriteLockGuard {
+    data: GuardData,
+}
+
+impl RMultiKeyWriteLockGuard {
+    /// Releases the lease and waits for the Redis operation to complete.
+    /// Starting release stops renewal and marks the lease lost until release completes.
+    /// Cancellation or an error leaves the guard lost and allows release to be retried.
+    pub async fn release(&mut self) -> Result<(), ReleaseError> {
+        self.data.release().await
+    }
+
+    /// Returns whether explicit release completed successfully.
+    /// This does not indicate whether an unreleased lease is still active.
+    pub const fn is_released(&self) -> bool {
+        self.data.is_released
+    }
+
+    /// Returns the local lease state using its conservative deadline.
+    pub fn lease_state(&self) -> LeaseState {
+        self.data.lease.state()
+    }
+
+    /// Waits until the lease is lost or released, including when renewal is disabled.
+    pub async fn wait_until_inactive(&self) -> LeaseState {
+        self.data.lease.wait_until_inactive().await
+    }
+}
+
+impl RLock {
+    /// Acquires a multi-key write lease with the default options.
+    /// The keys must be nonempty and unique, which debug builds assert.
+    /// Continuous readers may delay writers indefinitely, so consider a lock timeout.
     pub async fn acquire_multi_key_write(
         &self,
         keys: impl Into<Arc<Vec<String>>>,
@@ -448,153 +156,64 @@ impl RLock {
         self.acquire_multi_key_write_with_options(keys, AcquireOptions::default()).await
     }
 
-    /// Acquires a write (exclusive) lock with mutiple keys and options.
-    ///
-    /// See [`RLock::acquire_multi_key_write`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use std::{sync::Arc, time::Duration};
-    ///
-    /// use rlock::{AcquireOptions, async_lock::RLock};
-    ///
-    /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() {
-    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
-    ///
-    /// let lock = rlock
-    ///     .acquire_multi_key_write_with_options(
-    ///         Arc::new(vec![
-    ///             String::from("rlock:example"),
-    ///             String::from("rlock:example2"),
-    ///         ]),
-    ///         AcquireOptions::builder()
-    ///             .lock_timeout(Some(Duration::from_secs(3)))
-    ///             .build()
-    ///             .unwrap(),
-    ///     )
-    ///     .await
-    ///     .unwrap();
-    ///
-    /// // critial section
-    ///
-    /// // drop(lock);
-    /// # }
-    /// ```
+    /// Acquires the lease using the supplied options.
+    /// A lock timeout covers the complete wait, including Redis I/O, and a zero timeout sends no command.
+    /// Cancelling the wait retains cleanup responsibility for an in-flight acquisition.
+    /// The keys must be nonempty and unique, which debug builds assert.
     pub async fn acquire_multi_key_write_with_options(
         &self,
         keys: impl Into<Arc<Vec<String>>>,
         options: AcquireOptions,
     ) -> Result<RMultiKeyWriteLockGuard, AcquireError> {
-        if self.inner.is_shutdown.load(Ordering::Relaxed) {
-            return Err(AcquireError::Shutdown);
-        }
-
         let keys = keys.into();
-
         #[cfg(debug_assertions)]
         {
-            debug_assert!(!keys.is_empty(), "multi-key write lock requires at least one key");
-
-            let mut unique_keys = HashSet::with_capacity(keys.len());
-
+            let mut unique = std::collections::HashSet::with_capacity(keys.len());
+            debug_assert!(!keys.is_empty(), "multi-key locks require at least one key");
             for key in keys.iter() {
-                debug_assert!(
-                    unique_keys.insert(key.as_str()),
-                    "multi-key write lock requires unique keys"
-                );
+                debug_assert!(unique.insert(key.as_str()), "multi-key locks require unique keys");
             }
         }
-
-        let retry_interval = options.retry_interval();
-        let lock_timeout = options.lock_timeout();
-        let ttl = options.effective_ttl();
-        let renew_interval = options.effective_renew_interval().map(Some);
-
-        let uuid = Arc::new(Uuid::new_v4().to_string());
-
-        let start_time = Instant::now();
-
-        loop {
-            let result = acquire_multi_key_write_lock_async(
-                &mut self.inner.connection_manager.clone(),
-                &keys,
-                uuid.as_ref(),
-                ttl,
-            )
-            .await?;
-
-            if result {
-                break;
-            }
-
-            // a writer or live readers hold the lock, so we cannot acquire
-
-            // check lock_timeout
-            if let Some(lock_timeout) = lock_timeout
-                && start_time.elapsed() >= lock_timeout
-            {
-                return Err(AcquireError::LockTimeout);
-            }
-
-            // sleep retry_interval to allow other tasks to run
-            time::sleep(retry_interval).await;
-        }
-
-        // a new lock has been created
-
-        let stop_tx = if let Some(renew_interval) = renew_interval {
-            // renew automatically
-            let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
-
-            let keys = keys.clone();
-            let uuid = uuid.clone();
-            let mut connection_manager = self.inner.connection_manager.clone();
-
-            tokio::spawn(async move {
-                tracing::trace!(uuid = %uuid, "spawned a task in order to automatically renew the lock");
-
-                loop {
-                    tokio::select! {
-                        _ = &mut stop_rx => {
-                            tracing::trace!(uuid = %uuid, "a spawned renewal task for the lock is stopped because the lock is being released");
-
-                            break
-                        },
-                        _ = time::sleep(renew_interval.unwrap_or_else(|| ttl / 2)) => {
-                            match renew_multi_key_write_lock_async(&mut connection_manager, &keys, uuid.as_str(), ttl).await {
-                                Ok(false) => {
-                                    tracing::trace!(uuid = %uuid, "cannot find the lock, close the renewal task");
-                                    break;
-                                }
-                                Ok(true) => {
-                                    tracing::trace!(uuid = %uuid, "renewed the lock");
-
-                                    continue;
-                                }
-                                Err(error) => {
-                                    tracing::error!(uuid = %uuid, "an error occured when renewing the lock: {error}");
-                                    tracing::trace!(uuid = %uuid, "close the renewal task for the lock");
-                                    break;
-                                }
-                            }
-                        },
-                    }
-                }
-            });
-
-            Some(stop_tx)
-        } else {
-            None
-        };
-
+        let result =
+            self.acquire_internal(ReleaseRequestKey::MultipleWrite(keys), options, false).await?;
         Ok(RMultiKeyWriteLockGuard {
-            rlock: self.clone(),
-            is_released: false,
-            keys,
-            uuid,
-            stop_tx,
+            data: result.expect("retrying acquisition returns a guard")
         })
+    }
+
+    /// Attempts to acquire a multi-key write lease without retrying contention.
+    /// Returns `Ok(None)` when another holder prevents acquisition.
+    /// The keys must be nonempty and unique, which debug builds assert.
+    pub async fn try_acquire_multi_key_write(
+        &self,
+        keys: impl Into<Arc<Vec<String>>>,
+    ) -> Result<Option<RMultiKeyWriteLockGuard>, AcquireError> {
+        self.try_acquire_multi_key_write_with_options(keys, AcquireOptions::default()).await
+    }
+
+    /// Attempts one acquisition using the supplied options.
+    /// A lock timeout covers the complete wait, including Redis I/O, and a zero timeout sends no command.
+    /// Cancelling the wait retains cleanup responsibility for an in-flight acquisition.
+    /// The keys must be nonempty and unique, which debug builds assert.
+    /// Contention returns `Ok(None)`, while Redis failures and timeouts return an error.
+    pub async fn try_acquire_multi_key_write_with_options(
+        &self,
+        keys: impl Into<Arc<Vec<String>>>,
+        options: AcquireOptions,
+    ) -> Result<Option<RMultiKeyWriteLockGuard>, AcquireError> {
+        let keys = keys.into();
+        #[cfg(debug_assertions)]
+        {
+            let mut unique = std::collections::HashSet::with_capacity(keys.len());
+            debug_assert!(!keys.is_empty(), "multi-key locks require at least one key");
+            for key in keys.iter() {
+                debug_assert!(unique.insert(key.as_str()), "multi-key locks require unique keys");
+            }
+        }
+        let result =
+            self.acquire_internal(ReleaseRequestKey::MultipleWrite(keys), options, true).await?;
+        Ok(result.map(|data| RMultiKeyWriteLockGuard {
+            data,
+        }))
     }
 }

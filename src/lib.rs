@@ -214,6 +214,8 @@ pub mod async_lock;
 mod errors;
 mod functions;
 #[cfg(any(feature = "async", feature = "sync"))]
+mod lease;
+#[cfg(any(feature = "async", feature = "sync"))]
 mod lock_keys;
 #[cfg(any(feature = "async", feature = "sync"))]
 mod options;
@@ -229,11 +231,15 @@ pub mod sync_lock;
 pub use errors::*;
 pub use functions::*;
 #[cfg(any(feature = "async", feature = "sync"))]
+pub use lease::LeaseState;
+#[cfg(any(feature = "async", feature = "sync"))]
 pub use lock_keys::*;
 #[cfg(any(feature = "async", feature = "sync"))]
 pub use options::*;
 #[cfg(any(feature = "async", feature = "sync"))]
 pub use redis;
 
+#[cfg(all(test, any(feature = "async", feature = "sync")))]
+mod test_proxy;
 #[cfg(all(test, any(feature = "async", feature = "sync")))]
 mod test_support;
