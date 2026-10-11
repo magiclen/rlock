@@ -616,7 +616,7 @@ async fn test_try_acquisition_and_reusable_keys() {
 async fn test_canceled_acquisition_is_cleaned_up() {
     use crate::test_proxy::{TestProxy, assert_key_released};
     let proxy = TestProxy::new();
-    let rlock = RLock::new(proxy.url.as_str()).await.unwrap();
+    let rlock = RLock::new(proxy.connection_info.clone()).await.unwrap();
     let key = "test:async_canceled_acquisition";
     proxy.arm("SET", key);
     let manager = rlock.clone();
@@ -633,7 +633,7 @@ async fn test_canceled_acquisition_is_cleaned_up() {
 async fn test_deadline_cleans_up_late_success() {
     use crate::test_proxy::{TestProxy, assert_key_released};
     let proxy = TestProxy::new();
-    let rlock = RLock::new(proxy.url.as_str()).await.unwrap();
+    let rlock = RLock::new(proxy.connection_info.clone()).await.unwrap();
     let key = "test:async_late_deadline";
     proxy.arm("SET", key);
     let manager = rlock.clone();
@@ -659,7 +659,7 @@ async fn test_deadline_cleans_up_late_success() {
 async fn test_late_lease_does_not_remove_new_owner() {
     use crate::{RenewalMode, test_proxy::TestProxy};
     let proxy = TestProxy::new();
-    let rlock = RLock::new(proxy.url.as_str()).await.unwrap();
+    let rlock = RLock::new(proxy.connection_info.clone()).await.unwrap();
     let key = "test:async_late_lease";
     proxy.arm("SET", key);
     let manager = rlock.clone();
@@ -700,7 +700,7 @@ async fn test_late_lease_does_not_remove_new_owner() {
 async fn test_canceled_release_is_inactive_and_can_retry() {
     use crate::{LeaseState, RenewalMode, test_proxy::TestProxy};
     let proxy = TestProxy::new();
-    let rlock = RLock::new(proxy.url.as_str()).await.unwrap();
+    let rlock = RLock::new(proxy.connection_info.clone()).await.unwrap();
     let key = "test:async_canceled_release";
     let mut guard = rlock
         .acquire_mutex_with_options(
@@ -731,7 +731,7 @@ async fn test_canceled_release_is_inactive_and_can_retry() {
 async fn test_canceled_and_concurrent_shutdown_share_barrier() {
     use crate::test_proxy::TestProxy;
     let proxy = TestProxy::new();
-    let rlock = RLock::new(proxy.url.as_str()).await.unwrap();
+    let rlock = RLock::new(proxy.connection_info.clone()).await.unwrap();
     let key = "test:async_shutdown_barrier";
     let guard = rlock.acquire_mutex(key).await.unwrap();
     proxy.arm("EVALSHA", key);

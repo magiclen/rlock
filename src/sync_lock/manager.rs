@@ -129,6 +129,7 @@ impl RLock {
     /// Stops new acquisitions and waits for release requests already in the queue.
     /// Existing guards can still renew and release their leases; the release thread ends after its last sender is dropped.
     /// Concurrent calls wait for the same queue barrier.
+    /// In-flight Redis commands finish independently; unbounded sync IO cannot be interrupted by shutdown.
     ///
     /// # Panics
     ///

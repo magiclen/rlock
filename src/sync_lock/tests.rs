@@ -616,7 +616,7 @@ fn test_try_acquisition_and_reusable_keys() {
 fn test_deadline_cleans_up_late_success() {
     use crate::test_proxy::{TestProxy, assert_key_released};
     let proxy = TestProxy::new();
-    let rlock = RLock::new(proxy.url.as_str()).unwrap();
+    let rlock = RLock::new(proxy.connection_info.clone()).unwrap();
     let key = "test:sync_late_deadline";
     proxy.arm("SET", key);
     let start = std::time::Instant::now();

@@ -1,208 +1,188 @@
 /*!
 # RLock (Redis Lock)
 
-It is an easy-to-use Redis-backed lock library providing both async and sync Mutex, RwLock, and others.
+RLock provides Redis-backed mutex and read-write lock leases, with async and sync APIs and atomic acquisition across multiple keys.
+It requires Rust 1.89 or later and Redis 5.0 or later.
 
-## Examples
+## Installation
+
+The default `async` feature uses Tokio:
+
+```toml
+[dependencies]
+rlock = "0.1"
+tokio = { version = "1.19", features = ["macros", "rt"] }
+```
+
+For the sync API only:
+
+```toml
+[dependencies]
+rlock = { version = "0.1", default-features = false, features = ["sync"] }
+```
+
+To use both APIs, keep the default features and enable `sync`:
+
+```toml
+[dependencies]
+rlock = { version = "0.1", features = ["sync"] }
+tokio = { version = "1.19", features = ["macros", "rt"] }
+```
+
+## Async example
+
+Keep the guard alive while using the protected resource and explicitly release it when completion matters:
 
 ```rust,no_run
 # #[cfg(feature = "async")]
-use tokio::task::JoinSet;
-# #[cfg(feature = "async")]
-use rlock::async_lock::RLock;
+use std::time::Duration;
 
 # #[cfg(feature = "async")]
-#[tokio::main]
-async fn main() {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+use rlock::{AcquireOptions, RenewalMode, async_lock::RLock};
 
-    let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+# #[cfg(feature = "async")]
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rlock = RLock::new("redis://127.0.0.1:6379/0").await?;
+    let options = AcquireOptions::builder()
+        .ttl(Duration::from_secs(3))
+        .lock_timeout(Some(Duration::from_secs(2)))
+        .renewal_mode(RenewalMode::Auto)
+        .build()?;
 
-    async fn counter_increase(rlock: RLock) {
-        let lock = rlock.acquire_mutex("lock").await.unwrap();
+    let mut guard = rlock
+        .acquire_mutex_with_options("locks:reports:daily", options)
+        .await?;
 
-        // ----- critical section -----
+    println!("The daily report lease is {:?}.", guard.lease_state());
 
-        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        // ----------------------------
-
-        drop(lock);
-    }
-
-    let mut tasks = JoinSet::new();
-
-    for _ in 0..1000 {
-        tasks.spawn(counter_increase(rlock.clone()));
-    }
-
-    tasks.join_all().await;
-
-    assert_eq!(1000, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
-
+    guard.release().await?;
     rlock.shutdown().await;
+    Ok(())
 }
 
 # #[cfg(not(feature = "async"))]
 # fn main() {}
 ```
 
-```rust,no_run
-# #[cfg(feature = "async")]
-use tokio::task::JoinSet;
-# #[cfg(feature = "async")]
-use rlock::async_lock::RLock;
+`AcquireOptions::default()` uses a 10-second TTL, a 100-millisecond retry interval, automatic renewal, and no acquisition timeout.
+`RenewalMode::Auto` renews at half the effective TTL; `RenewalMode::Interval(duration)` selects an interval, and `RenewalMode::Disabled` turns renewal off.
+TTL values are rounded down to whole milliseconds, and an enabled renewal interval must be shorter than the effective TTL.
+The builder validates these options before use.
+The existing `renew_interval` getter and builder method remain available.
 
-# #[cfg(feature = "async")]
-#[tokio::main]
-async fn main() {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+## Sync and multiple keys
 
-    let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
-
-    async fn writer(rlock: RLock) {
-        let lock = rlock.acquire_write("lock").await.unwrap();
-
-        // ----- critical section -----
-
-        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        // ----------------------------
-
-        drop(lock);
-    }
-
-    async fn reader(rlock: RLock) {
-        let lock = rlock.acquire_read("lock").await.unwrap();
-
-        // ----- shared section -----
-
-        // multiple readers can hold the lock at the same time
-        let _value = COUNTER.load(std::sync::atomic::Ordering::Relaxed);
-
-        // --------------------------
-
-        drop(lock);
-    }
-
-    let mut tasks = JoinSet::new();
-
-    for _ in 0..100 {
-        tasks.spawn(writer(rlock.clone()));
-        tasks.spawn(reader(rlock.clone()));
-    }
-
-    tasks.join_all().await;
-
-    assert_eq!(100, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
-
-    rlock.shutdown().await;
-}
-
-# #[cfg(not(feature = "async"))]
-# fn main() {}
-```
+`LockKeys` validates that a key list is nonempty and contains no duplicates.
+Pass it by reference to reuse the same set for multiple acquisitions.
+This example attempts the entire set once and distinguishes contention from an error:
 
 ```rust,no_run
 # #[cfg(feature = "sync")]
-use rlock::sync_lock::RLock;
+use std::time::Duration;
 
 # #[cfg(feature = "sync")]
-fn main() {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+use rlock::{AcquireOptions, LockKeys, sync_lock::RLock};
 
-    let rlock = RLock::new("redis://127.0.0.1:6379/0").unwrap();
+# #[cfg(feature = "sync")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rlock = RLock::new("redis://127.0.0.1:6379/0")?;
+    let keys = LockKeys::new(["locks:accounts:123", "locks:accounts:456"])?;
+    let options = AcquireOptions::builder()
+        .lock_timeout(Some(Duration::from_secs(1)))
+        .build()?;
 
-    fn counter_increase(rlock: RLock) {
-        let lock = rlock.acquire_mutex("lock").unwrap();
-
-        // ----- critical section -----
-
-        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        // ----------------------------
-
-        drop(lock);
+    match rlock.try_acquire_multi_key_mutex_with_options(&keys, options)? {
+        Some(mut guard) => {
+            println!("Acquired both account leases.");
+            guard.release()?;
+        }
+        None => println!("At least one account is busy."),
     }
-
-    let mut threads = Vec::new();
-
-    for _ in 0..100 {
-        let rlock = rlock.clone();
-
-        threads.push(std::thread::spawn(move || counter_increase(rlock)));
-    }
-
-    for thread in threads {
-        thread.join().unwrap();
-    }
-
-    assert_eq!(100, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
 
     rlock.shutdown();
+    Ok(())
 }
 
 # #[cfg(not(feature = "sync"))]
 # fn main() {}
 ```
 
-```rust,no_run
-# #[cfg(feature = "sync")]
-use rlock::sync_lock::RLock;
+Both backends provide `acquire_mutex`, `acquire_read`, and `acquire_write`, plus their `acquire_multi_key_*` counterparts.
+Each has `_with_options`, `try_acquire_*`, and `try_acquire_*_with_options` variants.
+For a single read-write resource, use `acquire_read("locks:catalog")` for shared access and `acquire_write("locks:catalog")` for exclusive access.
+Readers are preferred: continuous readers can starve a writer, so set an acquisition timeout when an indefinite wait is unsuitable.
 
-# #[cfg(feature = "sync")]
-fn main() {
-    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+Mutex keys contain Redis strings; read-write keys contain sorted sets, with all holders stored at the supplied key.
+Do not use mutex and read-write operations on the same key.
+Successful multi-key acquisition covers the whole set; contention does not leave a partial acquisition.
+Expiry cleanup uses an ordered index instead of scanning all live readers.
+The index can use more memory than the previous hash, and removing many expired holders at once can still increase Lua latency.
 
-    let rlock = RLock::new("redis://127.0.0.1:6379/0").unwrap();
+## Lease state and release
 
-    fn writer(rlock: RLock) {
-        let lock = rlock.acquire_write("lock").unwrap();
+A guard's lifetime can exceed its Redis lease.
+`lease_state()` reports the local state:
 
-        // ----- critical section -----
+- `LeaseState::Active`: within the last confirmed, conservative lease deadline.
+- `LeaseState::Lost`: the deadline passed, renewal failed, or release began.
+- `LeaseState::Released`: explicit release completed or the guard was dropped.
 
-        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+Async guards also provide `wait_until_inactive().await`, which observes loss or release even when automatic renewal is disabled.
+`is_released()` only records successful completion of explicit release; `false` does not mean the lease is active.
 
-        // ----------------------------
+Starting `release()` marks the lease lost and stops automatic renewal.
+If release fails, or an async release wait is cancelled, the guard remains lost and release may be retried.
+Cancelling that wait does not cancel the Redis release operation already in progress.
+Dropping a guard stops renewal and attempts to queue release; a full or unavailable queue, or a failed release, leaves TTL expiry as the fallback.
 
-        drop(lock);
-    }
+`Active` is a conservative local observation, not a guarantee that a later external write will be safe.
+Redis failover, clock changes, network failures, or a process pause can invalidate exclusivity.
+These leases do not provide Rust memory synchronization and must not be used to justify unsynchronized access to local `unsafe` data.
+For external resources that require stale writers to be rejected, use resource-side fencing or conditional version checks; RLock does not supply fencing tokens.
 
-    fn reader(rlock: RLock) {
-        let lock = rlock.acquire_read("lock").unwrap();
+## Timeouts and cancellation
 
-        // ----- shared section -----
+`lock_timeout` covers the complete acquisition wait, including retries and Redis I/O.
+`Some(Duration::ZERO)` immediately returns `AcquireError::LockTimeout` without sending an acquisition command.
+A `try_acquire_*` call makes one acquisition attempt: contention returns `Ok(None)`, success returns `Ok(Some(guard))`, and errors remain errors.
+It still waits for Redis I/O and honors the supplied acquisition timeout.
 
-        // multiple readers can hold the lock at the same time
-        let _value = COUNTER.load(std::sync::atomic::Ordering::Relaxed);
+Cancelling or timing out an async acquisition leaves responsibility for an in-flight command with its supervisor.
+The supervisor waits for the original request to finish before cleaning up an unclaimed successful acquisition.
+A network error can leave the server-side outcome unknown, and stopping the Tokio runtime can interrupt cleanup; TTL expiry remains the fallback in these cases.
 
-        // --------------------------
+Sync acquisitions use an additional worker only when `lock_timeout` is `Some`.
+The deadline bounds the caller's wait and does not guarantee that background I/O or cleanup ends immediately.
+Without an acquisition timeout, the sync API performs Redis I/O inline.
+Shutdown wakes retry waits, but it cannot interrupt sync Redis I/O already in progress.
 
-        drop(lock);
-    }
+## Shutdown
 
-    let mut threads = Vec::new();
+`shutdown()` seals the manager against new acquisitions and waits for releases already queued before its barrier.
+Concurrent calls wait for the same barrier, and cancelling an async shutdown wait does not cancel shutdown itself.
+Existing guards can continue renewing and explicitly releasing their leases after shutdown returns.
+The release worker finishes once no guard or pending cleanup still needs it and queued releases have drained.
+In-flight acquisition commands finish independently and clean up results that are no longer accepted.
+Shutdown therefore does not wait for every live guard or every in-flight Redis command to end.
 
-    for _ in 0..100 {
-        let rlock_for_writer = rlock.clone();
-        let rlock_for_reader = rlock.clone();
+## Breaking changes and migration
 
-        threads.push(std::thread::spawn(move || writer(rlock_for_writer)));
-        threads.push(std::thread::spawn(move || reader(rlock_for_reader)));
-    }
+**Read-write lock storage changed from a Redis hash to a sorted set at the same key.**
+Old and new versions cannot coordinate read-write ownership on that key.
+Do not run them concurrently against the same protected resource, and do not switch to another namespace to bypass this incompatibility: separate keys would allow both versions to acquire the resource independently.
 
-    for thread in threads {
-        thread.join().unwrap();
-    }
+1. Stop new acquisitions in every old-version client.
+2. Drain the protected work, explicitly release all old guards, and stop all old renewal tasks or threads.
+3. Confirm that the old read-write keys have disappeared through release or expiry.
+4. Switch all clients for those resources to the new version before resuming acquisitions.
 
-    assert_eq!(100, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
+Waiting only the default 10 seconds is insufficient because old guards can renew their leases.
+The library does not automatically delete hashes encountered at read-write lock keys.
 
-    rlock.shutdown();
-}
-
-# #[cfg(not(feature = "sync"))]
-# fn main() {}
-```
+The public error enums have gained variants; update exhaustive matches when upgrading.
+The Tokio requirement is now 1.19 or later because shutdown coordination uses `watch::Sender::send_if_modified`.
+Review the timeout and shutdown contracts above when upgrading from earlier behavior.
 */
 
 #![cfg_attr(docsrs, feature(doc_cfg))]

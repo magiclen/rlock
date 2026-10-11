@@ -30,7 +30,7 @@ pub(crate) type ReleaseSender = Arc<mpsc::Sender<ReleaseCommand>>;
 pub(crate) struct RLockInner {
     pub(crate) connection_manager: ConnectionManager,
     pub(crate) admission:          Mutex<Option<ReleaseSender>>,
-    pub(crate) shutdown:           watch::Sender<ShutdownState>,
+    pub(crate) shutdown:           Arc<watch::Sender<ShutdownState>>,
 }
 
 impl fmt::Debug for RLockInner {
@@ -60,6 +60,7 @@ impl RLock {
     ) -> Result<Self, RedisError> {
         let (request_tx, mut request_rx) = mpsc::channel(RECYCLE_CHANNEL_BUFFER);
         let (shutdown, _) = watch::channel(ShutdownState::Open);
+        let shutdown = Arc::new(shutdown);
         let mut release_connection = connection_manager.clone();
         let worker = tokio::spawn(async move {
             while let Some(command) = request_rx.recv().await {

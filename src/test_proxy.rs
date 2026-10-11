@@ -23,10 +23,10 @@ struct Gate {
 }
 
 pub(crate) struct TestProxy {
-    pub(crate) url: String,
-    gate:           Arc<Gate>,
-    stopped:        Arc<AtomicBool>,
-    listener:       Option<thread::JoinHandle<()>>,
+    pub(crate) connection_info: redis::ConnectionInfo,
+    gate:                       Arc<Gate>,
+    stopped:                    Arc<AtomicBool>,
+    listener:                   Option<thread::JoinHandle<()>>,
 }
 
 enum Target {
@@ -133,10 +133,19 @@ impl TestProxy {
     pub(crate) fn new() -> Self {
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".into());
-        let target = redis::Client::open(redis_url).unwrap().get_connection_info().addr().clone();
+        let connection_info = redis::Client::open(redis_url).unwrap().get_connection_info().clone();
+        let target = connection_info.addr().clone();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
-        let url = format!("redis://127.0.0.1:{}/0", listener.local_addr().unwrap().port());
+        // Keep the selected database and credentials while using RESP2 framing in this proxy.
+        let settings =
+            connection_info.redis_settings().clone().set_protocol(redis::ProtocolVersion::RESP2);
+        let connection_info = connection_info
+            .set_addr(redis::ConnectionAddr::Tcp(
+                String::from("127.0.0.1"),
+                listener.local_addr().unwrap().port(),
+            ))
+            .set_redis_settings(settings);
         let gate = Arc::new(Gate::default());
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_gate = gate.clone();
@@ -159,7 +168,7 @@ impl TestProxy {
             }
         });
         Self {
-            url,
+            connection_info,
             gate,
             stopped,
             listener: Some(listener),

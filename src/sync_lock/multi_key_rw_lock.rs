@@ -21,7 +21,9 @@ pub struct RMultiKeyReadLockGuard {
 }
 
 impl RMultiKeyReadLockGuard {
-    /// Releases the lock. If the lock is released, returns `Ok(())`.
+    /// Releases the lock and waits for the Redis operation to complete.
+    /// Starting release stops renewal and marks the lease lost until release completes.
+    /// An error leaves the lease lost and allows release to be retried.
     ///
     /// # Examples
     ///
@@ -48,7 +50,7 @@ impl RMultiKeyReadLockGuard {
         self.inner.release()
     }
 
-    /// Determines whether the lock is released.
+    /// Returns whether explicit release completed successfully; an unreleased lease may already be lost.
     #[inline]
     pub const fn is_released(&self) -> bool {
         self.inner.is_released
@@ -75,7 +77,9 @@ pub struct RMultiKeyWriteLockGuard {
 }
 
 impl RMultiKeyWriteLockGuard {
-    /// Releases the lock. If the lock is released, returns `Ok(())`.
+    /// Releases the lock and waits for the Redis operation to complete.
+    /// Starting release stops renewal and marks the lease lost until release completes.
+    /// An error leaves the lease lost and allows release to be retried.
     ///
     /// # Examples
     ///
@@ -102,7 +106,7 @@ impl RMultiKeyWriteLockGuard {
         self.inner.release()
     }
 
-    /// Determines whether the lock is released.
+    /// Returns whether explicit release completed successfully; an unreleased lease may already be lost.
     #[inline]
     pub const fn is_released(&self) -> bool {
         self.inner.is_released
