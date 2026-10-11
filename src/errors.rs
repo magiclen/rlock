@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
+    io,
 };
 
 use redis::RedisError;
@@ -14,6 +15,10 @@ pub enum AcquireError {
     LockTimeout,
     /// Error indicating that the `RLock` manager is shutting down.
     Shutdown,
+    /// The lease expired before the acquired lock could be returned.
+    LeaseExpired,
+    /// A lock worker could not start or return a result.
+    WorkerError(io::Error),
 }
 
 impl From<RedisError> for AcquireError {
@@ -32,11 +37,23 @@ impl Display for AcquireError {
                 f.write_str("attempted to get a lock but the provided timeout was exceeded")
             },
             Self::Shutdown => f.write_str("the RLock manager is shutting down"),
+            Self::LeaseExpired => {
+                f.write_str("the lock lease expired before acquisition completed")
+            },
+            Self::WorkerError(error) => Display::fmt(error, f),
         }
     }
 }
 
-impl Error for AcquireError {}
+impl Error for AcquireError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::RedisError(error) => Some(error),
+            Self::WorkerError(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Errors for handling lock release failures.
 #[derive(Debug)]
@@ -61,4 +78,10 @@ impl Display for ReleaseError {
     }
 }
 
-impl Error for ReleaseError {}
+impl Error for ReleaseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::RedisError(error) => Some(error),
+        }
+    }
+}

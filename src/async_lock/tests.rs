@@ -6,7 +6,7 @@ use std::{
 use tokio::task::JoinSet;
 
 use super::*;
-use crate::{AcquireError, AcquireOptions};
+use crate::{AcquireError, AcquireOptions, test_support::TestState};
 
 static REDIS_URL: LazyLock<String> = LazyLock::new(|| {
     std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string())
@@ -25,6 +25,7 @@ async fn test_rlock_new_and_shutdown_1_2() {
         rlock.acquire_mutex("test:rlock_new_and_shutdown_1_2"),
     )
     .await
+    .unwrap()
     .unwrap();
 
     drop(lock);
@@ -60,6 +61,7 @@ async fn test_rlock_new_and_shutdown_3_4(n: u32) {
         ])),
     )
     .await
+    .unwrap()
     .unwrap();
 
     drop(lock);
@@ -138,19 +140,22 @@ async fn test_release_multi_key_mutex() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[tracing_test::traced_test]
 async fn test_mutex_critical_section() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: TestState = TestState::new();
 
     let rlock = RLock::new(REDIS_URL.as_str()).await.unwrap();
 
     async fn counter_increase(rlock: RLock) {
         let lock = rlock.acquire_mutex("test:mutex_critical_section").await.unwrap();
 
+        let holder = COUNTER.writer();
+
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         // ----------------------------
 
+        drop(holder);
         drop(lock);
     }
 
@@ -162,7 +167,7 @@ async fn test_mutex_critical_section() {
 
     tasks.join_all().await;
 
-    assert_eq!(1000, unsafe { COUNTER });
+    assert_eq!(1000, COUNTER.value());
 
     rlock.shutdown().await;
 }
@@ -303,19 +308,22 @@ async fn test_read_lock_excluded_by_write_lock() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[tracing_test::traced_test]
 async fn test_write_lock_critical_section() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: TestState = TestState::new();
 
     let rlock = RLock::new(REDIS_URL.as_str()).await.unwrap();
 
     async fn counter_increase(rlock: RLock) {
         let lock = rlock.acquire_write("test:write_lock_critical_section").await.unwrap();
 
+        let holder = COUNTER.writer();
+
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         // ----------------------------
 
+        drop(holder);
         drop(lock);
     }
 
@@ -327,7 +335,7 @@ async fn test_write_lock_critical_section() {
 
     tasks.join_all().await;
 
-    assert_eq!(1000, unsafe { COUNTER });
+    assert_eq!(1000, COUNTER.value());
 
     rlock.shutdown().await;
 }
@@ -335,37 +343,43 @@ async fn test_write_lock_critical_section() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[tracing_test::traced_test]
 async fn test_rw_lock_exclusion() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: TestState = TestState::new();
 
     let rlock = RLock::new(REDIS_URL.as_str()).await.unwrap();
 
     async fn writer(rlock: RLock) {
         let lock = rlock.acquire_write("test:rw_lock_exclusion").await.unwrap();
 
+        let holder = COUNTER.writer();
+
         // ----- critical section -----
 
         // the counter is odd only inside a held write lock
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         tokio::time::sleep(Duration::from_millis(1)).await;
 
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         // ----------------------------
 
+        drop(holder);
         drop(lock);
     }
 
     async fn reader(rlock: RLock) {
         let lock = rlock.acquire_read("test:rw_lock_exclusion").await.unwrap();
 
+        let holder = COUNTER.reader();
+
         // ----- shared section -----
 
         // a reader observing an odd counter proves that the write exclusion is broken
-        assert_eq!(0, unsafe { COUNTER } % 2);
+        assert_eq!(0, COUNTER.value() % 2);
 
         // --------------------------
 
+        drop(holder);
         drop(lock);
     }
 
@@ -378,7 +392,7 @@ async fn test_rw_lock_exclusion() {
 
     tasks.join_all().await;
 
-    assert_eq!(200, unsafe { COUNTER });
+    assert_eq!(200, COUNTER.value());
 
     rlock.shutdown().await;
 }
@@ -446,7 +460,7 @@ async fn test_release_multi_key_write() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[tracing_test::traced_test]
 async fn test_multi_key_write_lock_critical_section() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: TestState = TestState::new();
 
     let rlock = RLock::new(REDIS_URL.as_str()).await.unwrap();
 
@@ -459,12 +473,15 @@ async fn test_multi_key_write_lock_critical_section() {
             .await
             .unwrap();
 
+        let holder = COUNTER.writer();
+
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         // ----------------------------
 
+        drop(holder);
         drop(lock);
     }
 
@@ -476,7 +493,7 @@ async fn test_multi_key_write_lock_critical_section() {
 
     tasks.join_all().await;
 
-    assert_eq!(1000, unsafe { COUNTER });
+    assert_eq!(1000, COUNTER.value());
 
     rlock.shutdown().await;
 }
@@ -484,7 +501,7 @@ async fn test_multi_key_write_lock_critical_section() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[tracing_test::traced_test]
 async fn test_multi_key_mutex_critical_section() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: TestState = TestState::new();
 
     let rlock = RLock::new(REDIS_URL.as_str()).await.unwrap();
 
@@ -497,12 +514,15 @@ async fn test_multi_key_mutex_critical_section() {
             .await
             .unwrap();
 
+        let holder = COUNTER.writer();
+
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         // ----------------------------
 
+        drop(holder);
         drop(lock);
     }
 
@@ -514,7 +534,7 @@ async fn test_multi_key_mutex_critical_section() {
 
     tasks.join_all().await;
 
-    assert_eq!(1000, unsafe { COUNTER });
+    assert_eq!(1000, COUNTER.value());
 
     rlock.shutdown().await;
 }

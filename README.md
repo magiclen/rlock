@@ -11,7 +11,7 @@ It is an easy-to-use Redis-backed lock library providing both async and sync Mut
 use tokio::task::JoinSet;
 use rlock::async_lock::RLock;
 
-static mut COUNTER: u32 = 0;
+static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 #[tokio::main]
 async fn main() {
@@ -22,7 +22,7 @@ async fn main() {
 
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // ----------------------------
 
@@ -37,7 +37,7 @@ async fn main() {
 
     tasks.join_all().await;
 
-    assert_eq!(1000, unsafe { COUNTER });
+    assert_eq!(1000, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
 
     rlock.shutdown().await;
 }
@@ -47,7 +47,7 @@ async fn main() {
 use tokio::task::JoinSet;
 use rlock::async_lock::RLock;
 
-static mut COUNTER: u32 = 0;
+static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 #[tokio::main]
 async fn main() {
@@ -58,7 +58,7 @@ async fn main() {
 
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // ----------------------------
 
@@ -71,7 +71,7 @@ async fn main() {
         // ----- shared section -----
 
         // multiple readers can hold the lock at the same time
-        let _value = unsafe { COUNTER };
+        let _value = COUNTER.load(std::sync::atomic::Ordering::Relaxed);
 
         // --------------------------
 
@@ -87,7 +87,7 @@ async fn main() {
 
     tasks.join_all().await;
 
-    assert_eq!(100, unsafe { COUNTER });
+    assert_eq!(100, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
 
     rlock.shutdown().await;
 }
@@ -96,7 +96,7 @@ async fn main() {
 ```rust
 use rlock::sync_lock::RLock;
 
-static mut COUNTER: u32 = 0;
+static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn main() {
     let rlock = RLock::new("redis://127.0.0.1:6379/0").unwrap();
@@ -106,7 +106,7 @@ fn main() {
 
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // ----------------------------
 
@@ -125,7 +125,7 @@ fn main() {
         thread.join().unwrap();
     }
 
-    assert_eq!(100, unsafe { COUNTER });
+    assert_eq!(100, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
 
     rlock.shutdown();
 }
@@ -134,7 +134,7 @@ fn main() {
 ```rust
 use rlock::sync_lock::RLock;
 
-static mut COUNTER: u32 = 0;
+static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn main() {
     let rlock = RLock::new("redis://127.0.0.1:6379/0").unwrap();
@@ -144,7 +144,7 @@ fn main() {
 
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // ----------------------------
 
@@ -157,7 +157,7 @@ fn main() {
         // ----- shared section -----
 
         // multiple readers can hold the lock at the same time
-        let _value = unsafe { COUNTER };
+        let _value = COUNTER.load(std::sync::atomic::Ordering::Relaxed);
 
         // --------------------------
 
@@ -178,7 +178,7 @@ fn main() {
         thread.join().unwrap();
     }
 
-    assert_eq!(100, unsafe { COUNTER });
+    assert_eq!(100, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
 
     rlock.shutdown();
 }

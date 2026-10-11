@@ -8,6 +8,18 @@ const DEFAULT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const DEFAULT_LOCK_TIMEOUT: Option<Duration> = None;
 const DEFAULT_TTL: Duration = Duration::from_secs(10);
 const DEFAULT_RENEW_INTERVAL: Option<Option<Duration>> = Some(None);
+pub(crate) const MAX_TTL_MILLIS: u64 = (1 << 53) - 1;
+
+/// Controls automatic lock renewal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenewalMode {
+    /// Do not renew the lease.
+    Disabled,
+    /// Renew at half of the effective TTL.
+    Auto,
+    /// Renew using the given interval.
+    Interval(Duration),
+}
 
 /// Options used when acquiring a lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,10 +35,14 @@ pub struct AcquireOptions {
 pub enum AcquireOptionsBuildError {
     /// The TTL is shorter than Redis can represent in milliseconds.
     TtlTooShort,
+    /// The TTL is too large to represent exactly in Lua.
+    TtlTooLong,
     /// The retry interval is zero.
     RetryIntervalIsZero,
     /// The renewal interval is shorter than Redis can represent in milliseconds.
     RenewIntervalTooShort,
+    /// The renewal interval is not shorter than the effective TTL.
+    RenewIntervalNotLessThanTtl,
 }
 
 impl Display for AcquireOptionsBuildError {
@@ -34,9 +50,13 @@ impl Display for AcquireOptionsBuildError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::TtlTooShort => f.write_str("ttl must be at least 1 millisecond"),
+            Self::TtlTooLong => f.write_str("ttl exceeds the exact integer range of Lua"),
             Self::RetryIntervalIsZero => f.write_str("retry_interval must not be zero"),
             Self::RenewIntervalTooShort => {
                 f.write_str("renew_interval must be at least 1 millisecond")
+            },
+            Self::RenewIntervalNotLessThanTtl => {
+                f.write_str("renew_interval must be shorter than the effective ttl")
             },
         }
     }
@@ -103,9 +123,9 @@ impl AcquireOptions {
         self.retry_interval
     }
 
-    /// Maximum duration to wait for the lock to be acquired.
+    /// Maximum duration for acquisition, including retries and Redis IO.
     ///
-    /// If `None`, it always waits for the lock.
+    /// If `None`, acquisition has no deadline; a zero duration returns a timeout without sending a command.
     #[inline]
     pub const fn lock_timeout(&self) -> Option<Duration> {
         self.lock_timeout
@@ -127,6 +147,26 @@ impl AcquireOptions {
     #[inline]
     pub const fn renew_interval(&self) -> Option<Option<Duration>> {
         self.renew_interval
+    }
+
+    /// Returns the automatic renewal mode.
+    #[inline]
+    pub const fn renewal_mode(&self) -> RenewalMode {
+        match self.renew_interval {
+            None => RenewalMode::Disabled,
+            Some(None) => RenewalMode::Auto,
+            Some(Some(interval)) => RenewalMode::Interval(interval),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn effective_ttl(&self) -> Duration {
+        Duration::from_millis(self.ttl.as_millis() as u64)
+    }
+
+    #[inline]
+    pub(crate) fn effective_renew_interval(&self) -> Option<Duration> {
+        self.renew_interval.map(|interval| interval.unwrap_or_else(|| self.effective_ttl() / 2))
     }
 }
 
@@ -157,9 +197,9 @@ impl AcquireOptionsBuilder {
         self
     }
 
-    /// Maximum duration to wait for the lock to be acquired.
+    /// Maximum duration for acquisition, including retries and Redis IO.
     ///
-    /// If `None`, it always waits for the lock.
+    /// If `None`, acquisition has no deadline; a zero duration returns a timeout without sending a command.
     #[inline]
     pub const fn lock_timeout(mut self, duration: Option<Duration>) -> Self {
         self.lock_timeout = duration;
@@ -189,21 +229,43 @@ impl AcquireOptionsBuilder {
         self
     }
 
+    /// Sets the automatic renewal mode.
+    #[inline]
+    pub const fn renewal_mode(mut self, mode: RenewalMode) -> Self {
+        self.renew_interval = match mode {
+            RenewalMode::Disabled => None,
+            RenewalMode::Auto => Some(None),
+            RenewalMode::Interval(interval) => Some(Some(interval)),
+        };
+
+        self
+    }
+
     /// Builds validated acquisition options.
     pub fn build(self) -> Result<AcquireOptions, AcquireOptionsBuildError> {
         if self.ttl.as_millis() == 0 {
             return Err(AcquireOptionsBuildError::TtlTooShort);
         }
 
+        if self.ttl.as_millis() > u128::from(MAX_TTL_MILLIS) {
+            return Err(AcquireOptionsBuildError::TtlTooLong);
+        }
+
+        let effective_ttl = Duration::from_millis(self.ttl.as_millis() as u64);
+
         if self.retry_interval.is_zero() {
             return Err(AcquireOptionsBuildError::RetryIntervalIsZero);
         }
 
         if let Some(renew_interval) = self.renew_interval {
-            let renew_interval = renew_interval.unwrap_or_else(|| self.ttl / 2);
+            let renew_interval = renew_interval.unwrap_or_else(|| effective_ttl / 2);
 
             if renew_interval.as_millis() == 0 {
                 return Err(AcquireOptionsBuildError::RenewIntervalTooShort);
+            }
+
+            if renew_interval >= effective_ttl {
+                return Err(AcquireOptionsBuildError::RenewIntervalNotLessThanTtl);
             }
         }
 
@@ -239,5 +301,43 @@ mod tests {
         assert_eq!(Some(Duration::from_secs(1)), options.lock_timeout());
         assert_eq!(Duration::from_secs(3), options.ttl());
         assert_eq!(Some(Some(Duration::from_secs(1))), options.renew_interval());
+    }
+
+    #[test]
+    fn test_renewal_modes() {
+        for (mode, interval) in [
+            (RenewalMode::Disabled, None),
+            (RenewalMode::Auto, Some(None)),
+            (RenewalMode::Interval(Duration::from_secs(1)), Some(Some(Duration::from_secs(1)))),
+        ] {
+            let options = AcquireOptions::builder().renewal_mode(mode).build().unwrap();
+            assert_eq!(mode, options.renewal_mode());
+            assert_eq!(interval, options.renew_interval());
+        }
+    }
+
+    #[test]
+    fn test_lease_limits() {
+        assert_eq!(
+            Err(AcquireOptionsBuildError::TtlTooLong),
+            AcquireOptions::builder().ttl(Duration::MAX).build()
+        );
+        assert_eq!(
+            Err(AcquireOptionsBuildError::RenewIntervalNotLessThanTtl),
+            AcquireOptions::builder()
+                .ttl(Duration::from_micros(2900))
+                .renewal_mode(RenewalMode::Interval(Duration::from_micros(2500)))
+                .build()
+        );
+        assert!(
+            AcquireOptions::builder().ttl(Duration::from_millis(MAX_TTL_MILLIS)).build().is_ok()
+        );
+        assert!(
+            AcquireOptions::builder()
+                .ttl(Duration::from_millis(1))
+                .renewal_mode(RenewalMode::Disabled)
+                .build()
+                .is_ok()
+        );
     }
 }

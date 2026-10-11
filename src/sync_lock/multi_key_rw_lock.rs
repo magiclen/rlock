@@ -26,6 +26,7 @@ use crate::{
 /// * Dropping the guard automatically releases the lock unless the buffer of the lock release manager is full (in that case, the lock is released after its TTL expires in Redis)
 /// * If the renewal interval is not set to `None`, a background thread (aka the renewal thread) is spawned to extend the lock's TTL. The thread is terminated when the lock is released.
 #[derive(Debug)]
+#[must_use = "Keep this guard alive while using the protected resource."]
 pub struct RMultiKeyReadLockGuard {
     rlock:       RLock,
     is_released: bool,
@@ -120,6 +121,7 @@ impl Drop for RMultiKeyReadLockGuard {
 /// * Dropping the guard automatically releases the lock unless the buffer of the lock release manager is full (in that case, the lock is released after its TTL expires in Redis)
 /// * If the renewal interval is not set to `None`, a background thread (aka the renewal thread) is spawned to extend the lock's TTL. The thread is terminated when the lock is released.
 #[derive(Debug)]
+#[must_use = "Keep this guard alive while using the protected resource."]
 pub struct RMultiKeyWriteLockGuard {
     rlock:       RLock,
     is_released: bool,
@@ -300,8 +302,8 @@ impl RLock {
 
         let retry_interval = options.retry_interval();
         let lock_timeout = options.lock_timeout();
-        let ttl = options.ttl();
-        let renew_interval = options.renew_interval();
+        let ttl = options.effective_ttl();
+        let renew_interval = options.effective_renew_interval().map(Some);
 
         let uuid = Arc::new(Uuid::new_v4().to_string());
 
@@ -491,8 +493,8 @@ impl RLock {
 
         let retry_interval = options.retry_interval();
         let lock_timeout = options.lock_timeout();
-        let ttl = options.ttl();
-        let renew_interval = options.renew_interval();
+        let ttl = options.effective_ttl();
+        let renew_interval = options.effective_renew_interval().map(Some);
 
         let uuid = Arc::new(Uuid::new_v4().to_string());
 

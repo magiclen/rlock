@@ -14,7 +14,7 @@ use rlock::async_lock::RLock;
 # #[cfg(feature = "async")]
 #[tokio::main]
 async fn main() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
     let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
 
@@ -23,7 +23,7 @@ async fn main() {
 
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // ----------------------------
 
@@ -38,7 +38,7 @@ async fn main() {
 
     tasks.join_all().await;
 
-    assert_eq!(1000, unsafe { COUNTER });
+    assert_eq!(1000, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
 
     rlock.shutdown().await;
 }
@@ -56,7 +56,7 @@ use rlock::async_lock::RLock;
 # #[cfg(feature = "async")]
 #[tokio::main]
 async fn main() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
     let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
 
@@ -65,7 +65,7 @@ async fn main() {
 
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // ----------------------------
 
@@ -78,7 +78,7 @@ async fn main() {
         // ----- shared section -----
 
         // multiple readers can hold the lock at the same time
-        let _value = unsafe { COUNTER };
+        let _value = COUNTER.load(std::sync::atomic::Ordering::Relaxed);
 
         // --------------------------
 
@@ -94,7 +94,7 @@ async fn main() {
 
     tasks.join_all().await;
 
-    assert_eq!(100, unsafe { COUNTER });
+    assert_eq!(100, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
 
     rlock.shutdown().await;
 }
@@ -109,7 +109,7 @@ use rlock::sync_lock::RLock;
 
 # #[cfg(feature = "sync")]
 fn main() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
     let rlock = RLock::new("redis://127.0.0.1:6379/0").unwrap();
 
@@ -118,7 +118,7 @@ fn main() {
 
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // ----------------------------
 
@@ -137,7 +137,7 @@ fn main() {
         thread.join().unwrap();
     }
 
-    assert_eq!(100, unsafe { COUNTER });
+    assert_eq!(100, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
 
     rlock.shutdown();
 }
@@ -152,7 +152,7 @@ use rlock::sync_lock::RLock;
 
 # #[cfg(feature = "sync")]
 fn main() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
     let rlock = RLock::new("redis://127.0.0.1:6379/0").unwrap();
 
@@ -161,7 +161,7 @@ fn main() {
 
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // ----------------------------
 
@@ -174,7 +174,7 @@ fn main() {
         // ----- shared section -----
 
         // multiple readers can hold the lock at the same time
-        let _value = unsafe { COUNTER };
+        let _value = COUNTER.load(std::sync::atomic::Ordering::Relaxed);
 
         // --------------------------
 
@@ -195,7 +195,7 @@ fn main() {
         thread.join().unwrap();
     }
 
-    assert_eq!(100, unsafe { COUNTER });
+    assert_eq!(100, COUNTER.load(std::sync::atomic::Ordering::Relaxed));
 
     rlock.shutdown();
 }
@@ -214,6 +214,8 @@ pub mod async_lock;
 mod errors;
 mod functions;
 #[cfg(any(feature = "async", feature = "sync"))]
+mod lock_keys;
+#[cfg(any(feature = "async", feature = "sync"))]
 mod options;
 #[cfg(any(feature = "async", feature = "sync"))]
 mod release_request;
@@ -227,6 +229,11 @@ pub mod sync_lock;
 pub use errors::*;
 pub use functions::*;
 #[cfg(any(feature = "async", feature = "sync"))]
+pub use lock_keys::*;
+#[cfg(any(feature = "async", feature = "sync"))]
 pub use options::*;
 #[cfg(any(feature = "async", feature = "sync"))]
 pub use redis;
+
+#[cfg(all(test, any(feature = "async", feature = "sync")))]
+mod test_support;

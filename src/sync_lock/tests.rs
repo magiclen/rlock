@@ -5,7 +5,7 @@ use std::{
 };
 
 use super::*;
-use crate::{AcquireError, AcquireOptions};
+use crate::{AcquireError, AcquireOptions, test_support::TestState};
 
 static REDIS_URL: LazyLock<String> = LazyLock::new(|| {
     std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_string())
@@ -138,19 +138,22 @@ fn test_release_multi_key_mutex() {
 #[test]
 #[tracing_test::traced_test]
 fn test_mutex_critical_section() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: TestState = TestState::new();
 
     let rlock = RLock::new(REDIS_URL.as_str()).unwrap();
 
     fn counter_increase(rlock: RLock) {
         let lock = rlock.acquire_mutex("test:sync_mutex_critical_section").unwrap();
 
+        let holder = COUNTER.writer();
+
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         // ----------------------------
 
+        drop(holder);
         drop(lock);
     }
 
@@ -166,7 +169,7 @@ fn test_mutex_critical_section() {
         thread.join().unwrap();
     }
 
-    assert_eq!(100, unsafe { COUNTER });
+    assert_eq!(100, COUNTER.value());
 
     rlock.shutdown();
 }
@@ -299,19 +302,22 @@ fn test_read_lock_excluded_by_write_lock() {
 #[test]
 #[tracing_test::traced_test]
 fn test_write_lock_critical_section() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: TestState = TestState::new();
 
     let rlock = RLock::new(REDIS_URL.as_str()).unwrap();
 
     fn counter_increase(rlock: RLock) {
         let lock = rlock.acquire_write("test:sync_write_lock_critical_section").unwrap();
 
+        let holder = COUNTER.writer();
+
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         // ----------------------------
 
+        drop(holder);
         drop(lock);
     }
 
@@ -327,7 +333,7 @@ fn test_write_lock_critical_section() {
         thread.join().unwrap();
     }
 
-    assert_eq!(100, unsafe { COUNTER });
+    assert_eq!(100, COUNTER.value());
 
     rlock.shutdown();
 }
@@ -335,37 +341,43 @@ fn test_write_lock_critical_section() {
 #[test]
 #[tracing_test::traced_test]
 fn test_rw_lock_exclusion() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: TestState = TestState::new();
 
     let rlock = RLock::new(REDIS_URL.as_str()).unwrap();
 
     fn writer(rlock: RLock) {
         let lock = rlock.acquire_write("test:sync_rw_lock_exclusion").unwrap();
 
+        let holder = COUNTER.writer();
+
         // ----- critical section -----
 
         // the counter is odd only inside a held write lock
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         thread::sleep(Duration::from_millis(1));
 
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         // ----------------------------
 
+        drop(holder);
         drop(lock);
     }
 
     fn reader(rlock: RLock) {
         let lock = rlock.acquire_read("test:sync_rw_lock_exclusion").unwrap();
 
+        let holder = COUNTER.reader();
+
         // ----- shared section -----
 
         // a reader observing an odd counter proves that the write exclusion is broken
-        assert_eq!(0, unsafe { COUNTER } % 2);
+        assert_eq!(0, COUNTER.value() % 2);
 
         // --------------------------
 
+        drop(holder);
         drop(lock);
     }
 
@@ -383,7 +395,7 @@ fn test_rw_lock_exclusion() {
         thread.join().unwrap();
     }
 
-    assert_eq!(100, unsafe { COUNTER });
+    assert_eq!(100, COUNTER.value());
 
     rlock.shutdown();
 }
@@ -447,7 +459,7 @@ fn test_release_multi_key_write() {
 #[test]
 #[tracing_test::traced_test]
 fn test_multi_key_write_lock_critical_section() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: TestState = TestState::new();
 
     let rlock = RLock::new(REDIS_URL.as_str()).unwrap();
 
@@ -459,12 +471,15 @@ fn test_multi_key_write_lock_critical_section() {
             ]))
             .unwrap();
 
+        let holder = COUNTER.writer();
+
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         // ----------------------------
 
+        drop(holder);
         drop(lock);
     }
 
@@ -480,7 +495,7 @@ fn test_multi_key_write_lock_critical_section() {
         thread.join().unwrap();
     }
 
-    assert_eq!(100, unsafe { COUNTER });
+    assert_eq!(100, COUNTER.value());
 
     rlock.shutdown();
 }
@@ -488,7 +503,7 @@ fn test_multi_key_write_lock_critical_section() {
 #[test]
 #[tracing_test::traced_test]
 fn test_multi_key_mutex_critical_section() {
-    static mut COUNTER: u32 = 0;
+    static COUNTER: TestState = TestState::new();
 
     let rlock = RLock::new(REDIS_URL.as_str()).unwrap();
 
@@ -500,12 +515,15 @@ fn test_multi_key_mutex_critical_section() {
             ]))
             .unwrap();
 
+        let holder = COUNTER.writer();
+
         // ----- critical section -----
 
-        unsafe { COUNTER += 1 };
+        COUNTER.increment();
 
         // ----------------------------
 
+        drop(holder);
         drop(lock);
     }
 
@@ -521,7 +539,7 @@ fn test_multi_key_mutex_critical_section() {
         thread.join().unwrap();
     }
 
-    assert_eq!(100, unsafe { COUNTER });
+    assert_eq!(100, COUNTER.value());
 
     rlock.shutdown();
 }
