@@ -10,7 +10,7 @@ The default `async` feature uses Tokio:
 
 ```toml
 [dependencies]
-rlock = "0.1"
+rlock = "0.2"
 tokio = { version = "1.19", features = ["macros", "rt"] }
 ```
 
@@ -18,14 +18,14 @@ For the sync API only:
 
 ```toml
 [dependencies]
-rlock = { version = "0.1", default-features = false, features = ["sync"] }
+rlock = { version = "0.2", default-features = false, features = ["sync"] }
 ```
 
 To use both APIs, keep the default features and enable `sync`:
 
 ```toml
 [dependencies]
-rlock = { version = "0.1", features = ["sync"] }
+rlock = { version = "0.2", features = ["sync"] }
 tokio = { version = "1.19", features = ["macros", "rt"] }
 ```
 
