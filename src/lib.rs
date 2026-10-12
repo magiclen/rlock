@@ -198,9 +198,9 @@ mod lease;
 #[cfg(any(feature = "async", feature = "sync"))]
 mod lock_keys;
 #[cfg(any(feature = "async", feature = "sync"))]
-mod options;
+mod lock_request;
 #[cfg(any(feature = "async", feature = "sync"))]
-mod release_request;
+mod options;
 #[cfg(any(feature = "async", feature = "sync"))]
 mod scripts;
 #[cfg(feature = "sync")]

@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use super::{RLock, guard::GuardData};
-use crate::{
-    AcquireError, AcquireOptions, LeaseState, ReleaseError, release_request::ReleaseRequestKey,
-};
+use crate::{AcquireError, AcquireOptions, LeaseState, ReleaseError, lock_request::LockTarget};
 
 /// A guard for an acquired Redis read lease.
 /// Dropping the guard stops renewal and queues release, with TTL expiry as a fallback if the queue is unavailable.
@@ -54,11 +52,7 @@ impl RLock {
         options: AcquireOptions,
     ) -> Result<RReadLockGuard, AcquireError> {
         let result = self
-            .acquire_internal(
-                ReleaseRequestKey::Read(Arc::new(key.as_ref().to_owned())),
-                options,
-                false,
-            )
+            .acquire_internal(LockTarget::Read(Arc::new(key.as_ref().to_owned())), options, false)
             .await?;
         Ok(RReadLockGuard {
             data: result.expect("retrying acquisition returns a guard")
@@ -84,11 +78,7 @@ impl RLock {
         options: AcquireOptions,
     ) -> Result<Option<RReadLockGuard>, AcquireError> {
         let result = self
-            .acquire_internal(
-                ReleaseRequestKey::Read(Arc::new(key.as_ref().to_owned())),
-                options,
-                true,
-            )
+            .acquire_internal(LockTarget::Read(Arc::new(key.as_ref().to_owned())), options, true)
             .await?;
         Ok(result.map(|data| RReadLockGuard {
             data,
@@ -149,11 +139,7 @@ impl RLock {
         options: AcquireOptions,
     ) -> Result<RWriteLockGuard, AcquireError> {
         let result = self
-            .acquire_internal(
-                ReleaseRequestKey::Write(Arc::new(key.as_ref().to_owned())),
-                options,
-                false,
-            )
+            .acquire_internal(LockTarget::Write(Arc::new(key.as_ref().to_owned())), options, false)
             .await?;
         Ok(RWriteLockGuard {
             data: result.expect("retrying acquisition returns a guard")
@@ -179,11 +165,7 @@ impl RLock {
         options: AcquireOptions,
     ) -> Result<Option<RWriteLockGuard>, AcquireError> {
         let result = self
-            .acquire_internal(
-                ReleaseRequestKey::Write(Arc::new(key.as_ref().to_owned())),
-                options,
-                true,
-            )
+            .acquire_internal(LockTarget::Write(Arc::new(key.as_ref().to_owned())), options, true)
             .await?;
         Ok(result.map(|data| RWriteLockGuard {
             data,

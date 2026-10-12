@@ -1,186 +1,62 @@
 use std::time::Duration;
 
-use redis::{ConnectionLike, RedisResult};
+use redis::RedisResult;
 
-use crate::scripts::*;
+use super::pool::ConnectionPool;
+use crate::lock_request::{LockRequest, LockTarget};
 
-#[inline]
-pub(crate) fn acquire_lock_sync(
-    conn: &mut impl ConnectionLike,
-    key: &str,
-    uuid: &str,
+pub(crate) fn acquire_lock(
+    pool: &ConnectionPool,
+    request: &LockRequest,
     ttl: Duration,
-) -> RedisResult<Option<String>> {
-    redis::cmd("SET")
-        .arg(key)
-        .arg(uuid)
-        .arg("NX")
-        .arg("PX")
+) -> RedisResult<bool> {
+    let mut conn = pool.checkout()?;
+
+    if let LockTarget::Single(key) = &request.target {
+        let result: Option<String> = redis::cmd("SET")
+            .arg(key.as_str())
+            .arg(request.uuid.as_str())
+            .arg("NX")
+            .arg("PX")
+            .arg(ttl.as_millis())
+            // we cannot use exec here because we use "NX" in order to know whether the key already exists
+            .query(&mut *conn)?;
+
+        return Ok(result.is_some());
+    }
+
+    request
+        .target
+        .acquire_script()
+        .key(request.target.keys())
+        .arg(request.uuid.as_str())
         .arg(ttl.as_millis())
-        // we cannot use exec here because we use "NX" in order to know whether the key already exists
-        .query(conn)
+        .invoke(&mut *conn)
 }
 
-#[inline]
-pub(crate) fn acquire_multi_key_lock_sync(
-    conn: &mut impl ConnectionLike,
-    keys: &[String],
-    uuid: &str,
+pub(crate) fn renew_lock(
+    pool: &ConnectionPool,
+    request: &LockRequest,
     ttl: Duration,
 ) -> RedisResult<bool> {
-    SCRIPT_ACQUIRE_MULTI_KEY_LOCK.key(keys).arg(uuid).arg(ttl.as_millis()).invoke(conn)
+    let mut conn = pool.checkout()?;
+
+    request
+        .target
+        .renew_script()
+        .key(request.target.keys())
+        .arg(request.uuid.as_str())
+        .arg(ttl.as_millis())
+        .invoke(&mut *conn)
 }
 
-#[inline]
-pub(crate) fn renew_lock_sync(
-    conn: &mut impl ConnectionLike,
-    key: &str,
-    uuid: &str,
-    ttl: Duration,
-) -> RedisResult<bool> {
-    SCRIPT_RENEW_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke(conn)
-}
+pub(crate) fn release_lock(pool: &ConnectionPool, request: &LockRequest) -> RedisResult<bool> {
+    let mut conn = pool.checkout()?;
 
-#[inline]
-pub(crate) fn renew_multi_key_lock_sync(
-    conn: &mut impl ConnectionLike,
-    keys: &[String],
-    uuid: &str,
-    ttl: Duration,
-) -> RedisResult<bool> {
-    SCRIPT_RENEW_MULTI_KEY_LOCK.key(keys).arg(uuid).arg(ttl.as_millis()).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn release_lock_sync(
-    conn: &mut impl ConnectionLike,
-    key: &str,
-    uuid: &str,
-) -> RedisResult<bool> {
-    SCRIPT_RELEASE_LOCK.key(key).arg(uuid).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn release_multi_key_lock_sync(
-    conn: &mut impl ConnectionLike,
-    keys: &[String],
-    uuid: &str,
-) -> RedisResult<bool> {
-    SCRIPT_RELEASE_MULTI_KEY_LOCK.key(keys).arg(uuid).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn acquire_read_lock_sync(
-    conn: &mut impl ConnectionLike,
-    key: &str,
-    uuid: &str,
-    ttl: Duration,
-) -> RedisResult<bool> {
-    SCRIPT_ACQUIRE_READ_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn renew_read_lock_sync(
-    conn: &mut impl ConnectionLike,
-    key: &str,
-    uuid: &str,
-    ttl: Duration,
-) -> RedisResult<bool> {
-    SCRIPT_RENEW_READ_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn release_read_lock_sync(
-    conn: &mut impl ConnectionLike,
-    key: &str,
-    uuid: &str,
-) -> RedisResult<bool> {
-    SCRIPT_RELEASE_READ_LOCK.key(key).arg(uuid).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn acquire_write_lock_sync(
-    conn: &mut impl ConnectionLike,
-    key: &str,
-    uuid: &str,
-    ttl: Duration,
-) -> RedisResult<bool> {
-    SCRIPT_ACQUIRE_WRITE_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn renew_write_lock_sync(
-    conn: &mut impl ConnectionLike,
-    key: &str,
-    uuid: &str,
-    ttl: Duration,
-) -> RedisResult<bool> {
-    SCRIPT_RENEW_WRITE_LOCK.key(key).arg(uuid).arg(ttl.as_millis()).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn release_write_lock_sync(
-    conn: &mut impl ConnectionLike,
-    key: &str,
-    uuid: &str,
-) -> RedisResult<bool> {
-    SCRIPT_RELEASE_WRITE_LOCK.key(key).arg(uuid).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn acquire_multi_key_read_lock_sync(
-    conn: &mut impl ConnectionLike,
-    keys: &[String],
-    uuid: &str,
-    ttl: Duration,
-) -> RedisResult<bool> {
-    SCRIPT_ACQUIRE_MULTI_KEY_READ_LOCK.key(keys).arg(uuid).arg(ttl.as_millis()).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn renew_multi_key_read_lock_sync(
-    conn: &mut impl ConnectionLike,
-    keys: &[String],
-    uuid: &str,
-    ttl: Duration,
-) -> RedisResult<bool> {
-    SCRIPT_RENEW_MULTI_KEY_READ_LOCK.key(keys).arg(uuid).arg(ttl.as_millis()).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn release_multi_key_read_lock_sync(
-    conn: &mut impl ConnectionLike,
-    keys: &[String],
-    uuid: &str,
-) -> RedisResult<bool> {
-    SCRIPT_RELEASE_MULTI_KEY_READ_LOCK.key(keys).arg(uuid).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn acquire_multi_key_write_lock_sync(
-    conn: &mut impl ConnectionLike,
-    keys: &[String],
-    uuid: &str,
-    ttl: Duration,
-) -> RedisResult<bool> {
-    SCRIPT_ACQUIRE_MULTI_KEY_WRITE_LOCK.key(keys).arg(uuid).arg(ttl.as_millis()).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn renew_multi_key_write_lock_sync(
-    conn: &mut impl ConnectionLike,
-    keys: &[String],
-    uuid: &str,
-    ttl: Duration,
-) -> RedisResult<bool> {
-    SCRIPT_RENEW_MULTI_KEY_WRITE_LOCK.key(keys).arg(uuid).arg(ttl.as_millis()).invoke(conn)
-}
-
-#[inline]
-pub(crate) fn release_multi_key_write_lock_sync(
-    conn: &mut impl ConnectionLike,
-    keys: &[String],
-    uuid: &str,
-) -> RedisResult<bool> {
-    SCRIPT_RELEASE_MULTI_KEY_WRITE_LOCK.key(keys).arg(uuid).invoke(conn)
+    request
+        .target
+        .release_script()
+        .key(request.target.keys())
+        .arg(request.uuid.as_str())
+        .invoke(&mut *conn)
 }

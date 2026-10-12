@@ -6,103 +6,27 @@ use std::{
         mpsc::{self, RecvTimeoutError, Sender},
     },
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-use redis::RedisResult;
 use uuid::Uuid;
 
-use super::{RLock, manager::ReleaseCommand, operations::*, pool::ConnectionPool};
+use super::{
+    RLock,
+    manager::ReleaseCommand,
+    operations::{acquire_lock, release_lock, renew_lock},
+};
 use crate::{
     AcquireError, AcquireOptions, LeaseState, ReleaseError,
     lease::Lease,
-    release_request::{ReleaseRequest, ReleaseRequestKey},
+    lock_keys::debug_assert_lock_keys,
+    lock_request::{LockRequest, LockTarget},
 };
-
-#[derive(Clone, Copy)]
-enum Operation {
-    Acquire,
-    Renew,
-    Release,
-}
-
-fn execute(
-    pool: &ConnectionPool,
-    request: &ReleaseRequest,
-    ttl: Duration,
-    operation: Operation,
-) -> RedisResult<bool> {
-    let mut conn = pool.checkout()?;
-    let uuid = request.uuid.as_str();
-    match (&request.key, operation) {
-        (ReleaseRequestKey::Single(key), Operation::Acquire) => {
-            acquire_lock_sync(&mut *conn, key, uuid, ttl).map(|value| value.is_some())
-        },
-        (ReleaseRequestKey::Single(key), Operation::Renew) => {
-            renew_lock_sync(&mut *conn, key, uuid, ttl)
-        },
-        (ReleaseRequestKey::Single(key), Operation::Release) => {
-            release_lock_sync(&mut *conn, key, uuid)
-        },
-        (ReleaseRequestKey::Multiple(keys), Operation::Acquire) => {
-            acquire_multi_key_lock_sync(&mut *conn, keys, uuid, ttl)
-        },
-        (ReleaseRequestKey::Multiple(keys), Operation::Renew) => {
-            renew_multi_key_lock_sync(&mut *conn, keys, uuid, ttl)
-        },
-        (ReleaseRequestKey::Multiple(keys), Operation::Release) => {
-            release_multi_key_lock_sync(&mut *conn, keys, uuid)
-        },
-        (ReleaseRequestKey::Read(key), Operation::Acquire) => {
-            acquire_read_lock_sync(&mut *conn, key, uuid, ttl)
-        },
-        (ReleaseRequestKey::Read(key), Operation::Renew) => {
-            renew_read_lock_sync(&mut *conn, key, uuid, ttl)
-        },
-        (ReleaseRequestKey::Read(key), Operation::Release) => {
-            release_read_lock_sync(&mut *conn, key, uuid)
-        },
-        (ReleaseRequestKey::Write(key), Operation::Acquire) => {
-            acquire_write_lock_sync(&mut *conn, key, uuid, ttl)
-        },
-        (ReleaseRequestKey::Write(key), Operation::Renew) => {
-            renew_write_lock_sync(&mut *conn, key, uuid, ttl)
-        },
-        (ReleaseRequestKey::Write(key), Operation::Release) => {
-            release_write_lock_sync(&mut *conn, key, uuid)
-        },
-        (ReleaseRequestKey::MultipleRead(keys), Operation::Acquire) => {
-            acquire_multi_key_read_lock_sync(&mut *conn, keys, uuid, ttl)
-        },
-        (ReleaseRequestKey::MultipleRead(keys), Operation::Renew) => {
-            renew_multi_key_read_lock_sync(&mut *conn, keys, uuid, ttl)
-        },
-        (ReleaseRequestKey::MultipleRead(keys), Operation::Release) => {
-            release_multi_key_read_lock_sync(&mut *conn, keys, uuid)
-        },
-        (ReleaseRequestKey::MultipleWrite(keys), Operation::Acquire) => {
-            acquire_multi_key_write_lock_sync(&mut *conn, keys, uuid, ttl)
-        },
-        (ReleaseRequestKey::MultipleWrite(keys), Operation::Renew) => {
-            renew_multi_key_write_lock_sync(&mut *conn, keys, uuid, ttl)
-        },
-        (ReleaseRequestKey::MultipleWrite(keys), Operation::Release) => {
-            release_multi_key_write_lock_sync(&mut *conn, keys, uuid)
-        },
-    }
-}
-
-pub(crate) fn release_request(
-    pool: &ConnectionPool,
-    request: &ReleaseRequest,
-) -> RedisResult<bool> {
-    execute(pool, request, Duration::ZERO, Operation::Release)
-}
 
 #[derive(Debug)]
 pub(crate) struct GuardData {
     rlock:                  RLock,
-    request:                ReleaseRequest,
+    request:                LockRequest,
     release_tx:             Option<Arc<mpsc::SyncSender<ReleaseCommand>>>,
     pub(crate) is_released: bool,
     pub(crate) lease:       Arc<Lease>,
@@ -117,7 +41,7 @@ struct Acquisition {
 impl GuardData {
     fn new(
         rlock: RLock,
-        request: ReleaseRequest,
+        request: LockRequest,
         release_tx: Arc<mpsc::SyncSender<ReleaseCommand>>,
         lease: Arc<Lease>,
         start: Instant,
@@ -149,7 +73,7 @@ impl GuardData {
                         break;
                     }
                     let attempt = Instant::now();
-                    match execute(&pool, &request, ttl, Operation::Renew) {
+                    match renew_lock(&pool, &request, ttl) {
                         Ok(true) if lease.renew(attempt, ttl) => last_start = attempt,
                         Ok(_) => {
                             lease.lose();
@@ -175,7 +99,7 @@ impl GuardData {
         }
         self.lease.lose();
         self.stop_tx.take();
-        release_request(&self.rlock.inner.pool, &self.request)?;
+        release_lock(&self.rlock.inner.pool, &self.request)?;
         self.is_released = true;
         self.lease.release();
         self.release_tx.take();
@@ -199,17 +123,19 @@ impl Drop for GuardData {
 impl RLock {
     pub(crate) fn acquire_internal(
         &self,
-        key: ReleaseRequestKey,
+        target: LockTarget,
         options: AcquireOptions,
         once: bool,
     ) -> Result<Option<GuardData>, AcquireError> {
+        debug_assert_lock_keys(target.keys());
+
         let start = Instant::now();
         if options.lock_timeout().is_some_and(|timeout| timeout.is_zero()) {
             return Err(AcquireError::LockTimeout);
         }
         let release_tx = self.admit()?;
-        let request = ReleaseRequest {
-            key,
+        let request = LockRequest {
+            target,
             uuid: Arc::new(Uuid::new_v4().to_string()),
         };
         let canceled = Arc::new(AtomicBool::new(false));
@@ -219,18 +145,16 @@ impl RLock {
             let worker_canceled = canceled.clone();
             thread::Builder::new().name("rlock-acquire".into()).spawn(move || {
                 let cleanup = request.clone();
-                let permit = release_tx.clone();
                 let result = worker.acquire_loop(request, options, once, start, &worker_canceled, release_tx);
                 if let Ok(Some(guard)) = result {
                     let (accepted, accepted_rx) = mpsc::channel();
                     let sent = result_tx.send(Ok(Some(Acquisition { guard, accepted }))).is_ok();
-                    if (!sent || accepted_rx.recv().is_err()) && let Err(error) = release_request(&worker.inner.pool, &cleanup) {
+                    if (!sent || accepted_rx.recv().is_err()) && let Err(error) = release_lock(&worker.inner.pool, &cleanup) {
                         tracing::error!(uuid = %cleanup.uuid, "cannot clean up an unclaimed acquisition: {error}");
                     }
                 } else {
                     let _ = result_tx.send(result.map(|_| None));
                 }
-                drop(permit);
             }).map_err(AcquireError::WorkerError)?;
             match result_rx.recv_timeout(timeout.saturating_sub(start.elapsed())) {
                 Ok(result) => {
@@ -281,7 +205,7 @@ impl RLock {
 
     fn acquire_loop(
         &self,
-        request: ReleaseRequest,
+        request: LockRequest,
         options: AcquireOptions,
         once: bool,
         start: Instant,
@@ -299,7 +223,7 @@ impl RLock {
                 return Err(AcquireError::Shutdown);
             }
             let attempt = Instant::now();
-            let acquired = execute(&self.inner.pool, &request, ttl, Operation::Acquire)?;
+            let acquired = acquire_lock(&self.inner.pool, &request, ttl)?;
             if acquired {
                 let lease = Lease::new(attempt, ttl);
                 let admission = self.inner.release_tx.lock().unwrap();
@@ -316,7 +240,7 @@ impl RLock {
                 };
                 if let Some(error) = failure {
                     drop(admission);
-                    if let Err(error) = release_request(&self.inner.pool, &request) {
+                    if let Err(error) = release_lock(&self.inner.pool, &request) {
                         tracing::error!(uuid = %request.uuid, "cannot clean up a late acquisition: {error}");
                     }
                     return Err(error);

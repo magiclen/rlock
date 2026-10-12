@@ -11,17 +11,18 @@ use uuid::Uuid;
 use super::{
     RLock,
     manager::{ReleaseCommand, ReleaseSender, wait_for_shutdown},
-    operations::{acquire_request, release_request, renew_request},
+    operations::{acquire_lock, release_lock, renew_lock},
 };
 use crate::{
     AcquireError, AcquireOptions, LeaseState, ReleaseError,
     lease::Lease,
-    release_request::{ReleaseRequest, ReleaseRequestKey},
+    lock_keys::debug_assert_lock_keys,
+    lock_request::{LockRequest, LockTarget},
 };
 
 pub(crate) struct GuardData {
     connection:             ConnectionManager,
-    request:                ReleaseRequest,
+    request:                LockRequest,
     pub(crate) lease:       Arc<Lease>,
     sender:                 Option<ReleaseSender>,
     stop_tx:                Option<oneshot::Sender<()>>,
@@ -41,7 +42,7 @@ impl fmt::Debug for GuardData {
 impl GuardData {
     fn new(
         connection: ConnectionManager,
-        request: ReleaseRequest,
+        request: LockRequest,
         lease: Arc<Lease>,
         sender: ReleaseSender,
         attempt_start: Instant,
@@ -66,7 +67,7 @@ impl GuardData {
                         break;
                     }
                     let start = Instant::now();
-                    match renew_request(&mut connection, &request, ttl).await {
+                    match renew_lock(&mut connection, &request, ttl).await {
                         Ok(true) if lease.renew(start, ttl) => last_start = start,
                         Ok(_) => {
                             lease.lose();
@@ -108,12 +109,9 @@ impl GuardData {
 
         let mut connection = self.connection.clone();
         let request = self.request.clone();
-        let permit = self.sender.clone();
         let (result_tx, result_rx) = oneshot::channel();
         tokio::spawn(async move {
-            let result = release_request(&mut connection, &request).await;
-            let _ = result_tx.send(result);
-            drop(permit);
+            let _ = result_tx.send(release_lock(&mut connection, &request).await);
         });
         result_rx.await.map_err(|_| {
             ReleaseError::WorkerError(io::Error::other(
@@ -168,8 +166,8 @@ async fn wait_for_deadline(start: Instant, timeout: Option<Duration>) {
     }
 }
 
-async fn clean_abandoned(connection: &mut ConnectionManager, request: &ReleaseRequest) {
-    if let Err(error) = release_request(connection, request).await {
+async fn clean_abandoned(connection: &mut ConnectionManager, request: &LockRequest) {
+    if let Err(error) = release_lock(connection, request).await {
         tracing::error!(uuid = %request.uuid, "failed to clean up an abandoned acquisition: {error}");
     }
 }
@@ -188,10 +186,12 @@ enum Handoff {
 impl RLock {
     pub(crate) async fn acquire_internal(
         &self,
-        key: ReleaseRequestKey,
+        target: LockTarget,
         options: AcquireOptions,
         once: bool,
     ) -> Result<Option<GuardData>, AcquireError> {
+        debug_assert_lock_keys(target.keys());
+
         let start = Instant::now();
         let timeout = options.lock_timeout();
         if deadline_elapsed(start, timeout) {
@@ -199,8 +199,8 @@ impl RLock {
         }
         let sender = self.admit()?;
         let mut changed = self.inner.shutdown.subscribe();
-        let request = ReleaseRequest {
-            key,
+        let request = LockRequest {
+            target,
             uuid: Arc::new(Uuid::new_v4().to_string()),
         };
         let (result_tx, result_rx) = oneshot::channel();
@@ -234,7 +234,7 @@ impl RLock {
 
     async fn supervise_acquisition(
         &self,
-        request: ReleaseRequest,
+        request: LockRequest,
         options: AcquireOptions,
         once: bool,
         start: Instant,
@@ -261,7 +261,7 @@ impl RLock {
 
             let attempt_start = Instant::now();
             // Keep the command alive until its result is known before attempting cleanup.
-            let acquired = match acquire_request(&mut connection, &request, ttl).await {
+            let acquired = match acquire_lock(&mut connection, &request, ttl).await {
                 Ok(acquired) => acquired,
                 Err(error) => {
                     let _ = result_tx.take().unwrap().send(Err(error.into()));

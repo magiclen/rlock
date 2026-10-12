@@ -6,14 +6,14 @@ use std::{
 use redis::{Client, IntoConnectionInfo, RedisError, aio::ConnectionManager};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use super::operations::release_request;
-use crate::{AcquireError, release_request::ReleaseRequest};
+use super::operations::release_lock;
+use crate::{AcquireError, lock_request::LockRequest};
 
 const RECYCLE_CHANNEL_BUFFER: usize = 1024;
 
 #[derive(Debug)]
 pub(crate) enum ReleaseCommand {
-    Release(ReleaseRequest),
+    Release(LockRequest),
     Barrier(oneshot::Sender<()>),
 }
 
@@ -66,8 +66,7 @@ impl RLock {
             while let Some(command) = request_rx.recv().await {
                 match command {
                     ReleaseCommand::Release(request) => {
-                        if let Err(error) = release_request(&mut release_connection, &request).await
-                        {
+                        if let Err(error) = release_lock(&mut release_connection, &request).await {
                             tracing::error!(uuid = %request.uuid, "failed to release a dropped lock: {error}");
                         }
                     },

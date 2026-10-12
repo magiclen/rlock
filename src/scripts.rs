@@ -43,7 +43,11 @@ fn rw_script_with_ttl_preflight(body: &str) -> Script {
     Script::new(&format!("{TTL_PREFLIGHT}\n{RW_TYPE_PREFLIGHT}\n{body}"))
 }
 
-pub(crate) static SCRIPT_ACQUIRE_MULTI_KEY_LOCK: LazyLock<Script> = LazyLock::new(|| {
+pub(crate) static SCRIPT_ACQUIRE_LOCK: LazyLock<Script> = LazyLock::new(|| {
+    // KEYS    = the mutex keys to set
+    // ARGV[1] = token (the UUID of the lock owner)
+    // ARGV[2] = TTL (milliseconds)
+    // returns 1 if every key is set, or 0 if any key already exists
     script_with_ttl_preflight(
         r#"
             for i = 1, #KEYS do
@@ -61,7 +65,11 @@ pub(crate) static SCRIPT_ACQUIRE_MULTI_KEY_LOCK: LazyLock<Script> = LazyLock::ne
     )
 });
 
-fn renew_lock_script() -> Script {
+pub(crate) static SCRIPT_RENEW_LOCK: LazyLock<Script> = LazyLock::new(|| {
+    // KEYS    = the mutex keys to renew
+    // ARGV[1] = token (the UUID of the lock owner)
+    // ARGV[2] = new TTL (milliseconds)
+    // returns 1 if every key is renewed, or 0 if any key is not owned by the token
     script_with_ttl_preflight(
         r#"
             for i = 1, #KEYS do
@@ -77,12 +85,12 @@ fn renew_lock_script() -> Script {
             return 1
         "#,
     )
-}
+});
 
-pub(crate) static SCRIPT_RENEW_LOCK: LazyLock<Script> = LazyLock::new(renew_lock_script);
-pub(crate) static SCRIPT_RENEW_MULTI_KEY_LOCK: LazyLock<Script> = LazyLock::new(renew_lock_script);
-
-fn release_lock_script() -> Script {
+pub(crate) static SCRIPT_RELEASE_LOCK: LazyLock<Script> = LazyLock::new(|| {
+    // KEYS    = the mutex keys to release
+    // ARGV[1] = token (the UUID of the lock owner)
+    // every owned key is deleted, and the script returns 1 only if all keys were owned by the token
     Script::new(
         r#"
             local count = 0
@@ -102,13 +110,13 @@ fn release_lock_script() -> Script {
             end
         "#,
     )
-}
+});
 
-pub(crate) static SCRIPT_RELEASE_LOCK: LazyLock<Script> = LazyLock::new(release_lock_script);
-pub(crate) static SCRIPT_RELEASE_MULTI_KEY_LOCK: LazyLock<Script> =
-    LazyLock::new(release_lock_script);
-
-fn acquire_read_lock_script() -> Script {
+pub(crate) static SCRIPT_ACQUIRE_READ_LOCK: LazyLock<Script> = LazyLock::new(|| {
+    // KEYS    = the read-write lock keys (sorted sets) to acquire
+    // ARGV[1] = token (the UUID of the reader)
+    // ARGV[2] = TTL (milliseconds)
+    // expired holders are removed first, and the script returns 1 if the reader is added to every key, or 0 if any key has a live writer
     rw_script_with_ttl_preflight(
         r#"
             for i = 1, #KEYS do
@@ -132,14 +140,13 @@ fn acquire_read_lock_script() -> Script {
             return 1
         "#,
     )
-}
+});
 
-pub(crate) static SCRIPT_ACQUIRE_READ_LOCK: LazyLock<Script> =
-    LazyLock::new(acquire_read_lock_script);
-pub(crate) static SCRIPT_ACQUIRE_MULTI_KEY_READ_LOCK: LazyLock<Script> =
-    LazyLock::new(acquire_read_lock_script);
-
-fn renew_read_lock_script() -> Script {
+pub(crate) static SCRIPT_RENEW_READ_LOCK: LazyLock<Script> = LazyLock::new(|| {
+    // KEYS    = the read-write lock keys (sorted sets) to renew
+    // ARGV[1] = token (the UUID of the reader)
+    // ARGV[2] = new TTL (milliseconds)
+    // returns 1 if the reader is renewed in every key, or 0 if the reader is missing or expired in any key
     rw_script_with_ttl_preflight(
         r#"
             local member = "r:" .. ARGV[1]
@@ -165,13 +172,12 @@ fn renew_read_lock_script() -> Script {
             return 1
         "#,
     )
-}
+});
 
-pub(crate) static SCRIPT_RENEW_READ_LOCK: LazyLock<Script> = LazyLock::new(renew_read_lock_script);
-pub(crate) static SCRIPT_RENEW_MULTI_KEY_READ_LOCK: LazyLock<Script> =
-    LazyLock::new(renew_read_lock_script);
-
-fn release_read_lock_script() -> Script {
+pub(crate) static SCRIPT_RELEASE_READ_LOCK: LazyLock<Script> = LazyLock::new(|| {
+    // KEYS    = the read-write lock keys (sorted sets) to release
+    // ARGV[1] = token (the UUID of the reader)
+    // the reader is removed from every key, and the script returns 1 only if all keys contained it
     Script::new(
         r#"
             local member = "r:" .. ARGV[1]
@@ -190,14 +196,13 @@ fn release_read_lock_script() -> Script {
             end
         "#,
     )
-}
+});
 
-pub(crate) static SCRIPT_RELEASE_READ_LOCK: LazyLock<Script> =
-    LazyLock::new(release_read_lock_script);
-pub(crate) static SCRIPT_RELEASE_MULTI_KEY_READ_LOCK: LazyLock<Script> =
-    LazyLock::new(release_read_lock_script);
-
-fn acquire_write_lock_script() -> Script {
+pub(crate) static SCRIPT_ACQUIRE_WRITE_LOCK: LazyLock<Script> = LazyLock::new(|| {
+    // KEYS    = the read-write lock keys (sorted sets) to acquire
+    // ARGV[1] = token (the UUID of the writer)
+    // ARGV[2] = TTL (milliseconds)
+    // expired holders are removed first, and the script returns 1 if the writer is added to every key, or 0 if any key has a live holder
     rw_script_with_ttl_preflight(
         r#"
             for i = 1, #KEYS do
@@ -218,14 +223,13 @@ fn acquire_write_lock_script() -> Script {
             return 1
         "#,
     )
-}
+});
 
-pub(crate) static SCRIPT_ACQUIRE_WRITE_LOCK: LazyLock<Script> =
-    LazyLock::new(acquire_write_lock_script);
-pub(crate) static SCRIPT_ACQUIRE_MULTI_KEY_WRITE_LOCK: LazyLock<Script> =
-    LazyLock::new(acquire_write_lock_script);
-
-fn renew_write_lock_script() -> Script {
+pub(crate) static SCRIPT_RENEW_WRITE_LOCK: LazyLock<Script> = LazyLock::new(|| {
+    // KEYS    = the read-write lock keys (sorted sets) to renew
+    // ARGV[1] = token (the UUID of the writer)
+    // ARGV[2] = new TTL (milliseconds)
+    // returns 1 if the writer is renewed in every key, or 0 if the writer is missing or expired in any key
     rw_script_with_ttl_preflight(
         r#"
             local member = "w:" .. ARGV[1]
@@ -248,14 +252,12 @@ fn renew_write_lock_script() -> Script {
             return 1
         "#,
     )
-}
+});
 
-pub(crate) static SCRIPT_RENEW_WRITE_LOCK: LazyLock<Script> =
-    LazyLock::new(renew_write_lock_script);
-pub(crate) static SCRIPT_RENEW_MULTI_KEY_WRITE_LOCK: LazyLock<Script> =
-    LazyLock::new(renew_write_lock_script);
-
-fn release_write_lock_script() -> Script {
+pub(crate) static SCRIPT_RELEASE_WRITE_LOCK: LazyLock<Script> = LazyLock::new(|| {
+    // KEYS    = the read-write lock keys (sorted sets) to release
+    // ARGV[1] = token (the UUID of the writer)
+    // the writer is removed from every key, and the script returns 1 only if all keys contained it
     Script::new(
         r#"
             local member = "w:" .. ARGV[1]
@@ -274,12 +276,7 @@ fn release_write_lock_script() -> Script {
             end
         "#,
     )
-}
-
-pub(crate) static SCRIPT_RELEASE_WRITE_LOCK: LazyLock<Script> =
-    LazyLock::new(release_write_lock_script);
-pub(crate) static SCRIPT_RELEASE_MULTI_KEY_WRITE_LOCK: LazyLock<Script> =
-    LazyLock::new(release_write_lock_script);
+});
 
 #[cfg(test)]
 mod tests {
@@ -300,9 +297,9 @@ mod tests {
     fn test_ttl_preflight() {
         let mut conn = connection();
         for (script, name) in [
-            (&*SCRIPT_ACQUIRE_MULTI_KEY_LOCK, "mutex"),
-            (&*SCRIPT_ACQUIRE_MULTI_KEY_READ_LOCK, "read"),
-            (&*SCRIPT_ACQUIRE_MULTI_KEY_WRITE_LOCK, "write"),
+            (&*SCRIPT_ACQUIRE_LOCK, "mutex"),
+            (&*SCRIPT_ACQUIRE_READ_LOCK, "read"),
+            (&*SCRIPT_ACQUIRE_WRITE_LOCK, "write"),
         ] {
             let keys = [format!("test:script_ttl:{name}:a"), format!("test:script_ttl:{name}:b")];
             for ttl in ["0", "-1", "1.5", "9007199254740992"] {
@@ -368,8 +365,7 @@ mod tests {
                 .invoke::<bool>(&mut conn)
                 .unwrap()
         );
-        for script in [&*SCRIPT_ACQUIRE_MULTI_KEY_READ_LOCK, &*SCRIPT_ACQUIRE_MULTI_KEY_WRITE_LOCK]
-        {
+        for script in [&*SCRIPT_ACQUIRE_READ_LOCK, &*SCRIPT_ACQUIRE_WRITE_LOCK] {
             assert!(!script.key(&keys).arg("owner").arg(2000).invoke::<bool>(&mut conn).unwrap());
             assert_eq!(0, redis::cmd("EXISTS").arg(keys[0]).query::<usize>(&mut conn).unwrap());
         }
@@ -377,16 +373,8 @@ mod tests {
             SCRIPT_RELEASE_WRITE_LOCK.key(keys[1]).arg("other").invoke::<bool>(&mut conn).unwrap()
         );
         for (acquire, renew, release) in [
-            (
-                &*SCRIPT_ACQUIRE_MULTI_KEY_READ_LOCK,
-                &*SCRIPT_RENEW_MULTI_KEY_READ_LOCK,
-                &*SCRIPT_RELEASE_MULTI_KEY_READ_LOCK,
-            ),
-            (
-                &*SCRIPT_ACQUIRE_MULTI_KEY_WRITE_LOCK,
-                &*SCRIPT_RENEW_MULTI_KEY_WRITE_LOCK,
-                &*SCRIPT_RELEASE_MULTI_KEY_WRITE_LOCK,
-            ),
+            (&*SCRIPT_ACQUIRE_READ_LOCK, &*SCRIPT_RENEW_READ_LOCK, &*SCRIPT_RELEASE_READ_LOCK),
+            (&*SCRIPT_ACQUIRE_WRITE_LOCK, &*SCRIPT_RENEW_WRITE_LOCK, &*SCRIPT_RELEASE_WRITE_LOCK),
         ] {
             assert!(acquire.key(&keys).arg("owner").arg(2000).invoke::<bool>(&mut conn).unwrap());
             redis::cmd("DEL").arg(keys[1]).exec(&mut conn).unwrap();
@@ -418,7 +406,7 @@ mod tests {
         let mut conn = connection();
         let keys = ["test:script_mutex_release:a", "test:script_mutex_release:b"];
         assert!(
-            SCRIPT_ACQUIRE_MULTI_KEY_LOCK
+            SCRIPT_ACQUIRE_LOCK
                 .key(&keys)
                 .arg("owner")
                 .arg(2000)
@@ -426,13 +414,7 @@ mod tests {
                 .unwrap()
         );
         redis::cmd("SET").arg(keys[1]).arg("other").arg("PX").arg(2000).exec(&mut conn).unwrap();
-        assert!(
-            !SCRIPT_RELEASE_MULTI_KEY_LOCK
-                .key(&keys)
-                .arg("owner")
-                .invoke::<bool>(&mut conn)
-                .unwrap()
-        );
+        assert!(!SCRIPT_RELEASE_LOCK.key(&keys).arg("owner").invoke::<bool>(&mut conn).unwrap());
         assert_eq!(0, redis::cmd("EXISTS").arg(keys[0]).query::<usize>(&mut conn).unwrap());
         assert_eq!("other", redis::cmd("GET").arg(keys[1]).query::<String>(&mut conn).unwrap());
         redis::cmd("DEL").arg(keys[1]).exec(&mut conn).unwrap();
@@ -445,7 +427,7 @@ mod tests {
         redis::cmd("ZADD").arg(keys[0]).arg(1).arg("r:stale").exec(&mut conn).unwrap();
         redis::cmd("SET").arg(keys[1]).arg("other").exec(&mut conn).unwrap();
         let result: redis::RedisResult<bool> =
-            SCRIPT_ACQUIRE_MULTI_KEY_READ_LOCK.key(&keys).arg("owner").arg(2000).invoke(&mut conn);
+            SCRIPT_ACQUIRE_READ_LOCK.key(&keys).arg("owner").arg(2000).invoke(&mut conn);
         assert!(result.is_err());
         assert_eq!(1, redis::cmd("ZCARD").arg(keys[0]).query::<usize>(&mut conn).unwrap());
         redis::cmd("DEL").arg(&keys).exec(&mut conn).unwrap();

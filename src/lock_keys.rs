@@ -29,6 +29,31 @@ impl Display for LockKeysBuildError {
 
 impl Error for LockKeysBuildError {}
 
+fn validate(keys: &[String]) -> Result<(), LockKeysBuildError> {
+    if keys.is_empty() {
+        return Err(LockKeysBuildError::Empty);
+    }
+
+    let mut unique = HashSet::with_capacity(keys.len());
+    for key in keys {
+        if !unique.insert(key.as_str()) {
+            return Err(LockKeysBuildError::DuplicateKey(key.clone()));
+        }
+    }
+
+    Ok(())
+}
+
+/// Panics in debug builds if the keys are empty or contain duplicates.
+#[inline]
+pub(crate) fn debug_assert_lock_keys(keys: &[String]) {
+    if cfg!(debug_assertions)
+        && let Err(error) = validate(keys)
+    {
+        panic!("invalid lock keys: {error}");
+    }
+}
+
 impl LockKeys {
     /// Builds a reusable collection from strings.
     ///
@@ -41,16 +66,8 @@ impl LockKeys {
         I: IntoIterator<Item = S>,
         S: Into<String>, {
         let keys: Vec<String> = keys.into_iter().map(Into::into).collect();
-        if keys.is_empty() {
-            return Err(LockKeysBuildError::Empty);
-        }
 
-        let mut unique = HashSet::with_capacity(keys.len());
-        for key in &keys {
-            if !unique.insert(key.as_str()) {
-                return Err(LockKeysBuildError::DuplicateKey(key.clone()));
-            }
-        }
+        validate(&keys)?;
 
         Ok(Self(Arc::new(keys)))
     }

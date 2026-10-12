@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use super::{RLock, guard::GuardData};
-use crate::{
-    AcquireError, AcquireOptions, LeaseState, ReleaseError, release_request::ReleaseRequestKey,
-};
+use crate::{AcquireError, AcquireOptions, LeaseState, ReleaseError, lock_request::LockTarget};
 
 /// A guard for an acquired Redis multi-key mutex lease.
 /// Dropping the guard stops renewal and queues release, with TTL expiry as a fallback if the queue is unavailable.
@@ -58,17 +56,8 @@ impl RLock {
         keys: impl Into<Arc<Vec<String>>>,
         options: AcquireOptions,
     ) -> Result<RMultiKeyLockGuard, AcquireError> {
-        let keys = keys.into();
-        #[cfg(debug_assertions)]
-        {
-            let mut unique = std::collections::HashSet::with_capacity(keys.len());
-            debug_assert!(!keys.is_empty(), "multi-key locks require at least one key");
-            for key in keys.iter() {
-                debug_assert!(unique.insert(key.as_str()), "multi-key locks require unique keys");
-            }
-        }
         let result =
-            self.acquire_internal(ReleaseRequestKey::Multiple(keys), options, false).await?;
+            self.acquire_internal(LockTarget::Multiple(keys.into()), options, false).await?;
         Ok(RMultiKeyLockGuard {
             data: result.expect("retrying acquisition returns a guard")
         })
@@ -94,17 +83,8 @@ impl RLock {
         keys: impl Into<Arc<Vec<String>>>,
         options: AcquireOptions,
     ) -> Result<Option<RMultiKeyLockGuard>, AcquireError> {
-        let keys = keys.into();
-        #[cfg(debug_assertions)]
-        {
-            let mut unique = std::collections::HashSet::with_capacity(keys.len());
-            debug_assert!(!keys.is_empty(), "multi-key locks require at least one key");
-            for key in keys.iter() {
-                debug_assert!(unique.insert(key.as_str()), "multi-key locks require unique keys");
-            }
-        }
         let result =
-            self.acquire_internal(ReleaseRequestKey::Multiple(keys), options, true).await?;
+            self.acquire_internal(LockTarget::Multiple(keys.into()), options, true).await?;
         Ok(result.map(|data| RMultiKeyLockGuard {
             data,
         }))

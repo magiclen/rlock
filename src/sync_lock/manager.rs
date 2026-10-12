@@ -11,16 +11,16 @@ use std::{
 use redis::{Client, IntoConnectionInfo, RedisError};
 
 use super::{
-    guard::release_request,
+    operations::release_lock,
     pool::{ConnectionPool, PoolOptions},
 };
-use crate::{AcquireError, release_request::ReleaseRequest};
+use crate::{AcquireError, lock_request::LockRequest};
 
 const RECYCLE_CHANNEL_BUFFER: usize = 1024;
 
 #[derive(Debug)]
 pub(crate) enum ReleaseCommand {
-    Release(ReleaseRequest),
+    Release(LockRequest),
     Barrier(mpsc::Sender<()>),
 }
 
@@ -101,7 +101,7 @@ impl RLock {
             while let Ok(command) = request_rx.recv() {
                 match command {
                     ReleaseCommand::Release(request) => {
-                        if let Err(error) = release_request(&pool_for_release, &request) {
+                        if let Err(error) = release_lock(&pool_for_release, &request) {
                             tracing::error!(uuid = %request.uuid, "cannot release the lock: {error}");
                         }
                     },

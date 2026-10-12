@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use super::{RLock, guard::GuardData};
-use crate::{
-    AcquireError, AcquireOptions, LeaseState, ReleaseError, release_request::ReleaseRequestKey,
-};
+use crate::{AcquireError, AcquireOptions, LeaseState, ReleaseError, lock_request::LockTarget};
 
 /// A guard object representing an acquired Redis read lock.
 ///
@@ -164,15 +162,13 @@ impl RLock {
         key: impl AsRef<str>,
         options: AcquireOptions,
     ) -> Result<RReadLockGuard, AcquireError> {
-        self.acquire_internal(
-            ReleaseRequestKey::Read(Arc::new(key.as_ref().to_owned())),
-            options,
-            false,
-        )?
-        .map(|inner| RReadLockGuard {
+        let inner = self
+            .acquire_internal(LockTarget::Read(Arc::new(key.as_ref().to_owned())), options, false)?
+            .expect("retrying acquisition returns a guard");
+
+        Ok(RReadLockGuard {
             inner,
         })
-        .ok_or(AcquireError::LockTimeout)
     }
 
     /// Acquires a write (exclusive) lock with a key.
@@ -235,15 +231,13 @@ impl RLock {
         key: impl AsRef<str>,
         options: AcquireOptions,
     ) -> Result<RWriteLockGuard, AcquireError> {
-        self.acquire_internal(
-            ReleaseRequestKey::Write(Arc::new(key.as_ref().to_owned())),
-            options,
-            false,
-        )?
-        .map(|inner| RWriteLockGuard {
+        let inner = self
+            .acquire_internal(LockTarget::Write(Arc::new(key.as_ref().to_owned())), options, false)?
+            .expect("retrying acquisition returns a guard");
+
+        Ok(RWriteLockGuard {
             inner,
         })
-        .ok_or(AcquireError::LockTimeout)
     }
 
     /// Attempts to acquire a lock once; contention returns None and Redis IO can still wait.
@@ -261,16 +255,12 @@ impl RLock {
         key: impl AsRef<str>,
         options: AcquireOptions,
     ) -> Result<Option<RReadLockGuard>, AcquireError> {
-        self.acquire_internal(
-            ReleaseRequestKey::Read(Arc::new(key.as_ref().to_owned())),
-            options,
-            true,
-        )
-        .map(|guard| {
-            guard.map(|inner| RReadLockGuard {
-                inner,
+        self.acquire_internal(LockTarget::Read(Arc::new(key.as_ref().to_owned())), options, true)
+            .map(|guard| {
+                guard.map(|inner| RReadLockGuard {
+                    inner,
+                })
             })
-        })
     }
 
     /// Attempts to acquire a lock once; contention returns None and Redis IO can still wait.
@@ -288,15 +278,11 @@ impl RLock {
         key: impl AsRef<str>,
         options: AcquireOptions,
     ) -> Result<Option<RWriteLockGuard>, AcquireError> {
-        self.acquire_internal(
-            ReleaseRequestKey::Write(Arc::new(key.as_ref().to_owned())),
-            options,
-            true,
-        )
-        .map(|guard| {
-            guard.map(|inner| RWriteLockGuard {
-                inner,
+        self.acquire_internal(LockTarget::Write(Arc::new(key.as_ref().to_owned())), options, true)
+            .map(|guard| {
+                guard.map(|inner| RWriteLockGuard {
+                    inner,
+                })
             })
-        })
     }
 }
