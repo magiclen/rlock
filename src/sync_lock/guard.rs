@@ -61,28 +61,42 @@ impl GuardData {
             let request = guard.request.clone();
             let lease = guard.lease.clone();
             let ttl = options.effective_ttl();
+            let retry_interval = options.retry_interval();
             let renewal = thread::Builder::new().name("rlock-renew".into()).spawn(move || {
-                let mut last_start = start;
+                tracing::trace!(uuid = %request.uuid, "spawned a thread in order to automatically renew the lock");
+
+                let mut wait_start = start;
+                let mut wait = interval;
                 loop {
-                    let wait = interval.saturating_sub(last_start.elapsed()).min(lease.remaining());
-                    match stop_rx.recv_timeout(wait) {
-                        Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                    // recv_timeout works as the sleep, and it also wakes up early when the lock is released or the guard is dropped
+                    match stop_rx.recv_timeout(wait.saturating_sub(wait_start.elapsed()).min(lease.remaining())) {
+                        Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                            tracing::trace!(uuid = %request.uuid, "the renewal thread is stopped because the lock is being released");
+                            break;
+                        },
                         Err(RecvTimeoutError::Timeout) => {},
                     }
                     if lease.state() != LeaseState::Active {
+                        tracing::trace!(uuid = %request.uuid, "the renewal thread is stopped because the lease is no longer active");
                         break;
                     }
                     let attempt = Instant::now();
                     match renew_lock(&pool, &request, ttl) {
-                        Ok(true) if lease.renew(attempt, ttl) => last_start = attempt,
+                        Ok(true) if lease.renew(attempt, ttl) => {
+                            tracing::trace!(uuid = %request.uuid, "renewed the lock");
+                            wait_start = attempt;
+                            wait = interval;
+                        },
                         Ok(_) => {
+                            tracing::trace!(uuid = %request.uuid, "the renewal thread is stopped because the lease is lost");
                             lease.lose();
                             break;
                         },
                         Err(error) => {
-                            lease.lose();
-                            tracing::error!(uuid = %request.uuid, "cannot renew the lock: {error}");
-                            break;
+                            // the lease stays valid until its deadline, so retry before the remaining time runs out
+                            tracing::warn!(uuid = %request.uuid, "failed to renew the lock, retrying: {error}");
+                            wait_start = Instant::now();
+                            wait = retry_interval.min(lease.remaining() / 2);
                         },
                     }
                 }

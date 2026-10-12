@@ -63,6 +63,8 @@ impl RLock {
         let shutdown = Arc::new(shutdown);
         let mut release_connection = connection_manager.clone();
         let worker = tokio::spawn(async move {
+            tracing::trace!("spawned a task in order to release locks in Redis");
+
             while let Some(command) = request_rx.recv().await {
                 match command {
                     ReleaseCommand::Release(request) => {
@@ -75,6 +77,8 @@ impl RLock {
                     },
                 }
             }
+
+            tracing::trace!("the lock release task is stopped");
         });
         let worker_shutdown = shutdown.clone();
         tokio::spawn(async move {

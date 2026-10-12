@@ -98,6 +98,8 @@ impl RLock {
         let (request_tx, request_rx) = mpsc::sync_channel(RECYCLE_CHANNEL_BUFFER);
         let pool_for_release = pool.clone();
         thread::Builder::new().name("rlock-release".into()).spawn(move || {
+            tracing::trace!("spawned a thread in order to release locks in Redis");
+
             while let Ok(command) = request_rx.recv() {
                 match command {
                     ReleaseCommand::Release(request) => {
@@ -108,6 +110,8 @@ impl RLock {
                     ReleaseCommand::Barrier(ack) => { let _ = ack.send(()); },
                 }
             }
+
+            tracing::trace!("the lock release thread is stopped");
         }).map_err(RedisError::from)?;
         Ok(Self {
             inner: Arc::new(RLockInner {

@@ -54,29 +54,46 @@ impl GuardData {
             let request = request.clone();
             let lease = lease.clone();
             let ttl = options.effective_ttl();
+            let retry_interval = options.retry_interval();
             tokio::spawn(async move {
-                let mut last_start = attempt_start;
+                tracing::trace!(uuid = %request.uuid, "spawned a task in order to automatically renew the lock");
+
+                let mut wait_start = attempt_start;
+                let mut wait = interval;
                 loop {
                     tokio::select! {
                         biased;
-                        _ = &mut stop_rx => break,
-                        _ = lease.wait_until_inactive() => break,
-                        _ = wait_for_deadline(last_start, Some(interval)) => {},
+                        _ = &mut stop_rx => {
+                            tracing::trace!(uuid = %request.uuid, "the renewal task is stopped because the lock is being released");
+                            break;
+                        },
+                        _ = lease.wait_until_inactive() => {
+                            tracing::trace!(uuid = %request.uuid, "the renewal task is stopped because the lease is no longer active");
+                            break;
+                        },
+                        _ = wait_for_deadline(wait_start, Some(wait)) => {},
                     }
                     if lease.state() != LeaseState::Active {
+                        tracing::trace!(uuid = %request.uuid, "the renewal task is stopped because the lease is no longer active");
                         break;
                     }
                     let start = Instant::now();
                     match renew_lock(&mut connection, &request, ttl).await {
-                        Ok(true) if lease.renew(start, ttl) => last_start = start,
+                        Ok(true) if lease.renew(start, ttl) => {
+                            tracing::trace!(uuid = %request.uuid, "renewed the lock");
+                            wait_start = start;
+                            wait = interval;
+                        },
                         Ok(_) => {
+                            tracing::trace!(uuid = %request.uuid, "the renewal task is stopped because the lease is lost");
                             lease.lose();
                             break;
                         },
                         Err(error) => {
-                            tracing::error!(uuid = %request.uuid, "failed to renew a lock: {error}");
-                            lease.lose();
-                            break;
+                            // the lease stays valid until its deadline, so retry before the remaining time runs out
+                            tracing::warn!(uuid = %request.uuid, "failed to renew the lock, retrying: {error}");
+                            wait_start = Instant::now();
+                            wait = retry_interval.min(lease.remaining() / 2);
                         },
                     }
                 }

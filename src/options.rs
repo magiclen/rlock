@@ -119,6 +119,8 @@ impl AcquireOptions {
     }
 
     /// Time interval between each retry attempt when acquiring the lock.
+    ///
+    /// Automatic renewal also uses it to retry after a Redis error, but waits no longer than half of the remaining lease time.
     #[inline]
     pub const fn retry_interval(&self) -> Duration {
         self.retry_interval
@@ -191,6 +193,8 @@ impl AcquireOptionsBuilder {
     }
 
     /// Time interval between each retry attempt when acquiring the lock.
+    ///
+    /// Automatic renewal also uses it to retry after a Redis error, but waits no longer than half of the remaining lease time.
     #[inline]
     pub const fn retry_interval(mut self, duration: Duration) -> Self {
         self.retry_interval = duration;

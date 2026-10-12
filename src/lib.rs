@@ -125,8 +125,11 @@ A guard's lifetime can exceed its Redis lease.
 `lease_state()` reports the local state:
 
 - `LeaseState::Active`: within the last confirmed, conservative lease deadline.
-- `LeaseState::Lost`: the deadline passed, renewal failed, or release began.
+- `LeaseState::Lost`: the deadline passed, renewal found that the lease is no longer held, or release began.
 - `LeaseState::Released`: explicit release completed or the guard was dropped.
+
+When renewal fails because of a Redis error, it retries until it succeeds or the deadline passes.
+Each retry waits for the retry interval or half of the remaining lease time, whichever is shorter.
 
 Async guards also provide `wait_until_inactive().await`, which observes loss or release even when automatic renewal is disabled.
 `is_released()` only records successful completion of explicit release; `false` does not mean the lease is active.
