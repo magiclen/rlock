@@ -101,8 +101,10 @@ mod tests {
     #[test]
     fn test_reusable_keys() {
         let keys = LockKeys::new(["one", "two"]).unwrap();
+
         let first: Arc<Vec<String>> = (&keys).into();
         let second: Arc<Vec<String>> = keys.clone().into();
+
         assert_eq!(["one", "two"], keys.as_slice());
         assert!(Arc::ptr_eq(&first, &second));
     }

@@ -122,18 +122,24 @@ mod tests {
     #[test]
     fn test_lease_transitions() {
         let lease = Lease::new(Instant::now(), Duration::from_secs(1));
+
         assert_eq!(LeaseState::Active, lease.state());
         assert!(lease.renew(Instant::now(), Duration::from_secs(1)));
+
         lease.lose();
+
         assert_eq!(LeaseState::Lost, lease.state());
         assert!(!lease.renew(Instant::now(), Duration::from_secs(1)));
+
         lease.release();
+
         assert_eq!(LeaseState::Released, lease.state());
     }
 
     #[test]
     fn test_expired_lease() {
         let lease = Lease::new(Instant::now() - Duration::from_secs(1), Duration::from_millis(100));
+
         assert_eq!(LeaseState::Lost, lease.state());
         assert_eq!(Duration::ZERO, lease.remaining());
         assert!(!lease.renew(Instant::now(), Duration::from_secs(1)));

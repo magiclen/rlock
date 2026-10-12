@@ -296,15 +296,18 @@ mod tests {
     #[test]
     fn test_ttl_preflight() {
         let mut conn = connection();
+
         for (script, name) in [
             (&*SCRIPT_ACQUIRE_LOCK, "mutex"),
             (&*SCRIPT_ACQUIRE_READ_LOCK, "read"),
             (&*SCRIPT_ACQUIRE_WRITE_LOCK, "write"),
         ] {
             let keys = [format!("test:script_ttl:{name}:a"), format!("test:script_ttl:{name}:b")];
+
             for ttl in ["0", "-1", "1.5", "9007199254740992"] {
                 let result: redis::RedisResult<bool> =
                     script.key(&keys).arg("owner").arg(ttl).invoke(&mut conn);
+
                 assert!(result.is_err());
                 assert_eq!(0, redis::cmd("EXISTS").arg(&keys).query::<usize>(&mut conn).unwrap());
             }
@@ -315,6 +318,7 @@ mod tests {
     fn test_reader_lease_and_cleanup() {
         let mut conn = connection();
         let key = "test:script_reader_cleanup";
+
         assert!(
             SCRIPT_ACQUIRE_READ_LOCK
                 .key(key)
@@ -331,7 +335,9 @@ mod tests {
                 .invoke::<bool>(&mut conn)
                 .unwrap()
         );
+
         std::thread::sleep(Duration::from_millis(120));
+
         assert!(
             !SCRIPT_RENEW_READ_LOCK
                 .key(key)
@@ -340,7 +346,9 @@ mod tests {
                 .invoke::<bool>(&mut conn)
                 .unwrap()
         );
+
         redis::cmd("ZADD").arg(key).arg(1).arg("r:stale").exec(&mut conn).unwrap();
+
         assert!(
             SCRIPT_RENEW_READ_LOCK
                 .key(key)
@@ -357,6 +365,7 @@ mod tests {
     fn test_multi_key_contention_and_partial_release() {
         let mut conn = connection();
         let keys = ["test:script_multi:a", "test:script_multi:b"];
+
         assert!(
             SCRIPT_ACQUIRE_WRITE_LOCK
                 .key(keys[1])
@@ -365,19 +374,24 @@ mod tests {
                 .invoke::<bool>(&mut conn)
                 .unwrap()
         );
+
         for script in [&*SCRIPT_ACQUIRE_READ_LOCK, &*SCRIPT_ACQUIRE_WRITE_LOCK] {
             assert!(!script.key(&keys).arg("owner").arg(2000).invoke::<bool>(&mut conn).unwrap());
             assert_eq!(0, redis::cmd("EXISTS").arg(keys[0]).query::<usize>(&mut conn).unwrap());
         }
+
         assert!(
             SCRIPT_RELEASE_WRITE_LOCK.key(keys[1]).arg("other").invoke::<bool>(&mut conn).unwrap()
         );
+
         for (acquire, renew, release) in [
             (&*SCRIPT_ACQUIRE_READ_LOCK, &*SCRIPT_RENEW_READ_LOCK, &*SCRIPT_RELEASE_READ_LOCK),
             (&*SCRIPT_ACQUIRE_WRITE_LOCK, &*SCRIPT_RENEW_WRITE_LOCK, &*SCRIPT_RELEASE_WRITE_LOCK),
         ] {
             assert!(acquire.key(&keys).arg("owner").arg(2000).invoke::<bool>(&mut conn).unwrap());
+
             redis::cmd("DEL").arg(keys[1]).exec(&mut conn).unwrap();
+
             assert!(
                 SCRIPT_ACQUIRE_WRITE_LOCK
                     .key(keys[1])
@@ -386,7 +400,9 @@ mod tests {
                     .invoke::<bool>(&mut conn)
                     .unwrap()
             );
+
             let before = redis::cmd("PTTL").arg(keys[0]).query::<i64>(&mut conn).unwrap();
+
             assert!(!renew.key(&keys).arg("owner").arg(4000).invoke::<bool>(&mut conn).unwrap());
             assert!(redis::cmd("PTTL").arg(keys[0]).query::<i64>(&mut conn).unwrap() <= before);
             assert!(!release.key(&keys).arg("owner").invoke::<bool>(&mut conn).unwrap());
@@ -405,6 +421,7 @@ mod tests {
     fn test_mutex_partial_release() {
         let mut conn = connection();
         let keys = ["test:script_mutex_release:a", "test:script_mutex_release:b"];
+
         assert!(
             SCRIPT_ACQUIRE_LOCK
                 .key(&keys)
@@ -413,10 +430,13 @@ mod tests {
                 .invoke::<bool>(&mut conn)
                 .unwrap()
         );
+
         redis::cmd("SET").arg(keys[1]).arg("other").arg("PX").arg(2000).exec(&mut conn).unwrap();
+
         assert!(!SCRIPT_RELEASE_LOCK.key(&keys).arg("owner").invoke::<bool>(&mut conn).unwrap());
         assert_eq!(0, redis::cmd("EXISTS").arg(keys[0]).query::<usize>(&mut conn).unwrap());
         assert_eq!("other", redis::cmd("GET").arg(keys[1]).query::<String>(&mut conn).unwrap());
+
         redis::cmd("DEL").arg(keys[1]).exec(&mut conn).unwrap();
     }
 
@@ -424,12 +444,16 @@ mod tests {
     fn test_type_preflight_before_cleanup() {
         let mut conn = connection();
         let keys = ["test:script_type:a", "test:script_type:b"];
+
         redis::cmd("ZADD").arg(keys[0]).arg(1).arg("r:stale").exec(&mut conn).unwrap();
         redis::cmd("SET").arg(keys[1]).arg("other").exec(&mut conn).unwrap();
+
         let result: redis::RedisResult<bool> =
             SCRIPT_ACQUIRE_READ_LOCK.key(&keys).arg("owner").arg(2000).invoke(&mut conn);
+
         assert!(result.is_err());
         assert_eq!(1, redis::cmd("ZCARD").arg(keys[0]).query::<usize>(&mut conn).unwrap());
+
         redis::cmd("DEL").arg(&keys).exec(&mut conn).unwrap();
     }
 }

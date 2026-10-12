@@ -316,6 +316,7 @@ mod tests {
             (RenewalMode::Interval(Duration::from_secs(1)), Some(Some(Duration::from_secs(1)))),
         ] {
             let options = AcquireOptions::builder().renewal_mode(mode).build().unwrap();
+
             assert_eq!(mode, options.renewal_mode());
             assert_eq!(interval, options.renew_interval());
         }
