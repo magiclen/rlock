@@ -87,7 +87,7 @@ impl PoolOptions {
 /// # Behavior
 ///
 /// * When no idle connection is available, a new connection is created, so checking out never blocks.
-/// * A connection whose command has failed is dropped instead of being returned to the pool, and a following checkout creates a fresh connection. This approximates the transparent reconnection of the async connection manager and never reuses a connection whose reply state is unknown after a timeout.
+/// * A connection whose command has failed is dropped instead of being returned to the pool, and a following checkout creates a fresh connection. This approximates the transparent reconnection of the async connection manager and never reuses a connection that a timeout may have left with a partial command or reply.
 /// * The pool does not ping a connection on checkout and does not recycle idle connections by age. A stale connection which has been closed by the server costs one failed call before it is discarded.
 pub(crate) struct ConnectionPool {
     client:  Client,
@@ -151,7 +151,7 @@ impl ConnectionPool {
         let result = f(&mut conn);
 
         if result.is_err() {
-            // the reply state is unknown after an error such as a timeout, so this connection must not be reused
+            // a timeout can leave a partial command or reply on the connection, so it is not reused after any error
             conn.conn.take();
         }
 

@@ -694,3 +694,47 @@ fn test_retry_wait_does_not_exceed_deadline() {
 
     rlock.shutdown();
 }
+
+#[test]
+#[tracing_test::traced_test]
+fn test_response_timeout_drops_connection() {
+    let proxy = TestProxy::new();
+    let rlock = RLock::new_with_pool_options(
+        proxy.connection_info.clone(),
+        PoolOptions::new().response_timeout(Some(Duration::from_millis(200))),
+    )
+    .unwrap();
+    let key = "test:sync_response_timeout";
+    let client_id = || {
+        rlock
+            .inner
+            .pool
+            .with_connection(|conn| redis::cmd("CLIENT").arg("ID").query::<i64>(conn))
+            .unwrap()
+    };
+
+    let mut guard = rlock.acquire_mutex(key).unwrap();
+
+    guard.release().unwrap();
+
+    let id = client_id();
+
+    proxy.arm("SET", key);
+
+    let start = Instant::now();
+    let result = rlock.acquire_mutex(key);
+
+    assert!(matches!(result, Err(AcquireError::RedisError(error)) if error.is_timeout()));
+    assert!(start.elapsed() < Duration::from_secs(1));
+
+    proxy.resume();
+
+    // the timed-out connection must be dropped, so the next command runs on a new connection
+    assert_ne!(id, client_id());
+
+    let mut conn = redis::Client::open(REDIS_URL.as_str()).unwrap().get_connection().unwrap();
+
+    redis::cmd("DEL").arg(key).exec(&mut conn).unwrap();
+
+    rlock.shutdown();
+}
