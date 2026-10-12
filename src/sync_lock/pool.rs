@@ -60,7 +60,7 @@ impl PoolOptions {
         self
     }
 
-    /// Maximum duration to wait when establishing a new connection.
+    /// Maximum duration to wait when establishing and initializing a new connection.
     ///
     /// If `None`, the default connection behavior of the Redis client is used.
     #[inline]
@@ -72,6 +72,7 @@ impl PoolOptions {
 
     /// Maximum duration to wait when sending a command or reading its reply.
     ///
+    /// This timeout applies only after the connection is initialized; use `connection_timeout` to also limit connection setup.
     /// If `None`, Redis I/O can wait indefinitely, so the worker of a timed acquisition can stay blocked after the caller has timed out.
     /// The duration must not be zero.
     #[inline]
@@ -147,15 +148,7 @@ impl ConnectionPool {
         &self,
         f: impl FnOnce(&mut Connection) -> RedisResult<T>,
     ) -> RedisResult<T> {
-        let mut conn = self.checkout()?;
-        let result = f(&mut conn);
-
-        if result.is_err() {
-            // a timeout can leave a partial command or reply on the connection, so it is not reused after any error
-            conn.conn.take();
-        }
-
-        result
+        self.checkout()?.run(f)
     }
 
     /// Returns a connection to the pool, dropping it if it is broken or if the pool is full.
@@ -176,6 +169,23 @@ impl ConnectionPool {
 pub(crate) struct PooledConnection<'a> {
     pool: &'a ConnectionPool,
     conn: Option<Connection>,
+}
+
+impl PooledConnection<'_> {
+    /// Runs a function with this connection, dropping the connection if the function fails.
+    pub(crate) fn run<T>(
+        mut self,
+        f: impl FnOnce(&mut Connection) -> RedisResult<T>,
+    ) -> RedisResult<T> {
+        let result = f(&mut self);
+
+        if result.is_err() {
+            // a timeout can leave a partial command or reply on the connection, so it is not reused after any error
+            self.conn.take();
+        }
+
+        result
+    }
 }
 
 impl Deref for PooledConnection<'_> {

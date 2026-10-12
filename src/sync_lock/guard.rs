@@ -152,8 +152,8 @@ impl RLock {
             target,
             uuid: Arc::new(Uuid::new_v4().to_string()),
         };
-        let canceled = Arc::new(AtomicBool::new(false));
         let result = if let Some(timeout) = options.lock_timeout() {
+            let canceled = Arc::new(AtomicBool::new(false));
             let (result_tx, result_rx) = mpsc::sync_channel(1);
             let worker = self.clone();
             let worker_canceled = canceled.clone();
@@ -206,6 +206,7 @@ impl RLock {
                 },
             }
         } else {
+            let canceled = AtomicBool::new(false);
             self.acquire_loop(request, options, once, start, &canceled, release_tx)
         };
         if let Ok(Some(guard)) = &result
@@ -237,7 +238,20 @@ impl RLock {
                 return Err(AcquireError::Shutdown);
             }
             let attempt = Instant::now();
-            let acquired = acquire_lock(&self.inner.pool, &request, ttl)?;
+            let conn = self.inner.pool.checkout()?;
+            let acquired = match acquire_lock(conn, &request, ttl) {
+                Ok(acquired) => acquired,
+                Err(error) => {
+                    // an I/O error can leave the command applied in Redis, so queue a release in case the lease exists
+                    if error.is_io_error()
+                        && let Err(cleanup_error) =
+                            release_tx.try_send(ReleaseCommand::Release(request.clone()))
+                    {
+                        tracing::warn!(uuid = %request.uuid, "cannot queue acquisition cleanup; the lease will expire: {cleanup_error}");
+                    }
+                    return Err(error.into());
+                },
+            };
             if acquired {
                 let lease = Lease::new(attempt, ttl);
                 let failure = if self.is_shutdown() {

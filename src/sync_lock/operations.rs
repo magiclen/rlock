@@ -2,15 +2,15 @@ use std::time::Duration;
 
 use redis::RedisResult;
 
-use super::pool::ConnectionPool;
+use super::pool::{ConnectionPool, PooledConnection};
 use crate::lock_request::{LockRequest, LockTarget};
 
 pub(crate) fn acquire_lock(
-    pool: &ConnectionPool,
+    conn: PooledConnection<'_>,
     request: &LockRequest,
     ttl: Duration,
 ) -> RedisResult<bool> {
-    pool.with_connection(|conn| {
+    conn.run(|conn| {
         if let LockTarget::Single(key) = &request.target {
             let result: Option<String> = redis::cmd("SET")
                 .arg(key.as_str())

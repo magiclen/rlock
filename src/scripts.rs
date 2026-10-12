@@ -12,10 +12,19 @@ const TTL_PREFLIGHT: &str = r#"
     end
 
     local ttl = tonumber(raw_ttl)
+
+    if not ttl or ttl > 9007199254740991 then
+        return redis.error_reply("ERR rlock TTL exceeds the exact integer range")
+    end
+"#;
+
+// It uses ttl from TTL_PREFLIGHT and defines now and expiry.
+// Server time followed by writes requires effect replication, available since Redis 5.0.
+const RW_EXPIRY_PREFLIGHT: &str = r#"
     local time = redis.call("TIME")
     local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 
-    if not ttl or now < 0 or now > 9007199254740991 or ttl > 9007199254740991 - now then
+    if now < 0 or now > 9007199254740991 or ttl > 9007199254740991 - now then
         return redis.error_reply("ERR rlock expiry exceeds the exact integer range")
     end
 
@@ -24,7 +33,6 @@ const TTL_PREFLIGHT: &str = r#"
 
 // A read-write lock uses one sorted set with positive reader expiries and negative writer expiries.
 // Members include the owner UUID so release cannot remove another owner's lease.
-// Server time followed by writes requires effect replication, available since Redis 5.0.
 const RW_TYPE_PREFLIGHT: &str = r#"
     for i = 1, #KEYS do
         local kind = redis.call("TYPE", KEYS[i]).ok
@@ -39,8 +47,8 @@ fn script_with_ttl_preflight(body: &str) -> Script {
     Script::new(&format!("{TTL_PREFLIGHT}\n{body}"))
 }
 
-fn rw_script_with_ttl_preflight(body: &str) -> Script {
-    Script::new(&format!("{TTL_PREFLIGHT}\n{RW_TYPE_PREFLIGHT}\n{body}"))
+fn rw_script_with_preflight(body: &str) -> Script {
+    Script::new(&format!("{TTL_PREFLIGHT}\n{RW_EXPIRY_PREFLIGHT}\n{RW_TYPE_PREFLIGHT}\n{body}"))
 }
 
 pub(crate) static SCRIPT_ACQUIRE_LOCK: LazyLock<Script> = LazyLock::new(|| {
@@ -117,7 +125,7 @@ pub(crate) static SCRIPT_ACQUIRE_READ_LOCK: LazyLock<Script> = LazyLock::new(|| 
     // ARGV[1] = token (the UUID of the reader)
     // ARGV[2] = TTL (milliseconds)
     // expired holders are removed first, and the script returns 1 if the reader is added to every key, or 0 if any key has a live writer
-    rw_script_with_ttl_preflight(
+    rw_script_with_preflight(
         r#"
             for i = 1, #KEYS do
                 redis.call("ZREMRANGEBYSCORE", KEYS[i], -now, now)
@@ -147,7 +155,7 @@ pub(crate) static SCRIPT_RENEW_READ_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // ARGV[1] = token (the UUID of the reader)
     // ARGV[2] = new TTL (milliseconds)
     // returns 1 if the reader is renewed in every key, or 0 if the reader is missing or expired in any key
-    rw_script_with_ttl_preflight(
+    rw_script_with_preflight(
         r#"
             local member = "r:" .. ARGV[1]
 
@@ -203,7 +211,7 @@ pub(crate) static SCRIPT_ACQUIRE_WRITE_LOCK: LazyLock<Script> = LazyLock::new(||
     // ARGV[1] = token (the UUID of the writer)
     // ARGV[2] = TTL (milliseconds)
     // expired holders are removed first, and the script returns 1 if the writer is added to every key, or 0 if any key has a live holder
-    rw_script_with_ttl_preflight(
+    rw_script_with_preflight(
         r#"
             for i = 1, #KEYS do
                 redis.call("ZREMRANGEBYSCORE", KEYS[i], -now, now)
@@ -230,7 +238,7 @@ pub(crate) static SCRIPT_RENEW_WRITE_LOCK: LazyLock<Script> = LazyLock::new(|| {
     // ARGV[1] = token (the UUID of the writer)
     // ARGV[2] = new TTL (milliseconds)
     // returns 1 if the writer is renewed in every key, or 0 if the writer is missing or expired in any key
-    rw_script_with_ttl_preflight(
+    rw_script_with_preflight(
         r#"
             local member = "w:" .. ARGV[1]
 
@@ -389,6 +397,7 @@ mod tests {
             (&*SCRIPT_ACQUIRE_WRITE_LOCK, &*SCRIPT_RENEW_WRITE_LOCK, &*SCRIPT_RELEASE_WRITE_LOCK),
         ] {
             assert!(acquire.key(&keys).arg("owner").arg(2000).invoke::<bool>(&mut conn).unwrap());
+            assert!(renew.key(&keys).arg("owner").arg(2000).invoke::<bool>(&mut conn).unwrap());
 
             redis::cmd("DEL").arg(keys[1]).exec(&mut conn).unwrap();
 

@@ -547,26 +547,38 @@ async fn test_multi_key_mutex_critical_section() {
 #[tracing_test::traced_test]
 async fn test_lease_renewal_and_shutdown_with_live_guard() {
     let rlock = RLock::new(REDIS_URL.as_str()).await.unwrap();
+    let options = AcquireOptions::builder().ttl(Duration::from_millis(300)).build().unwrap();
 
-    let mut guard = rlock
-        .acquire_mutex_with_options(
-            "test:async_live_shutdown",
-            AcquireOptions::builder().ttl(Duration::from_millis(300)).build().unwrap(),
-        )
+    let mut mutex = rlock
+        .acquire_mutex_with_options("test:async_live_shutdown", options.clone())
         .await
         .unwrap();
+    let mut read = rlock
+        .acquire_read_with_options("test:async_live_shutdown_read", options.clone())
+        .await
+        .unwrap();
+    let mut write =
+        rlock.acquire_write_with_options("test:async_live_shutdown_write", options).await.unwrap();
 
     rlock.shutdown().await;
 
     tokio::time::sleep(Duration::from_millis(800)).await;
 
-    assert_eq!(LeaseState::Active, guard.lease_state());
+    assert_eq!(LeaseState::Active, mutex.lease_state());
+    assert_eq!(LeaseState::Active, read.lease_state());
+    assert_eq!(LeaseState::Active, write.lease_state());
     assert!(matches!(rlock.acquire_mutex("test:async_closed").await, Err(AcquireError::Shutdown)));
 
-    guard.release().await.unwrap();
+    mutex.release().await.unwrap();
+    read.release().await.unwrap();
+    write.release().await.unwrap();
 
-    assert_eq!(LeaseState::Released, guard.wait_until_inactive().await);
-    assert!(guard.is_released());
+    assert_eq!(LeaseState::Released, mutex.wait_until_inactive().await);
+    assert_eq!(LeaseState::Released, read.wait_until_inactive().await);
+    assert_eq!(LeaseState::Released, write.wait_until_inactive().await);
+    assert!(mutex.is_released());
+    assert!(read.is_released());
+    assert!(write.is_released());
 
     rlock.shutdown().await;
 }

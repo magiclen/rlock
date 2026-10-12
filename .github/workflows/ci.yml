@@ -40,6 +40,7 @@ jobs:
           - --no-default-features
           - --no-default-features --features async
           - --no-default-features --features sync
+          - --all-features
     name: Test ${{ matrix.toolchain }} on ${{ matrix.os }} (${{ matrix.features }})
     runs-on: ${{ matrix.os }}
     steps:

@@ -552,25 +552,34 @@ fn test_multi_key_mutex_critical_section() {
 #[tracing_test::traced_test]
 fn test_lease_renewal_and_shutdown_with_live_guard() {
     let rlock = RLock::new(REDIS_URL.as_str()).unwrap();
+    let options = AcquireOptions::builder().ttl(Duration::from_millis(300)).build().unwrap();
 
-    let mut guard = rlock
-        .acquire_mutex_with_options(
-            "test:sync_live_shutdown",
-            AcquireOptions::builder().ttl(Duration::from_millis(300)).build().unwrap(),
-        )
-        .unwrap();
+    let mut mutex =
+        rlock.acquire_mutex_with_options("test:sync_live_shutdown", options.clone()).unwrap();
+    let mut read =
+        rlock.acquire_read_with_options("test:sync_live_shutdown_read", options.clone()).unwrap();
+    let mut write =
+        rlock.acquire_write_with_options("test:sync_live_shutdown_write", options).unwrap();
 
     rlock.shutdown();
 
     thread::sleep(Duration::from_millis(800));
 
-    assert_eq!(LeaseState::Active, guard.lease_state());
+    assert_eq!(LeaseState::Active, mutex.lease_state());
+    assert_eq!(LeaseState::Active, read.lease_state());
+    assert_eq!(LeaseState::Active, write.lease_state());
     assert!(matches!(rlock.acquire_mutex("test:sync_closed"), Err(AcquireError::Shutdown)));
 
-    guard.release().unwrap();
+    mutex.release().unwrap();
+    read.release().unwrap();
+    write.release().unwrap();
 
-    assert_eq!(LeaseState::Released, guard.lease_state());
-    assert!(guard.is_released());
+    assert_eq!(LeaseState::Released, mutex.lease_state());
+    assert_eq!(LeaseState::Released, read.lease_state());
+    assert_eq!(LeaseState::Released, write.lease_state());
+    assert!(mutex.is_released());
+    assert!(read.is_released());
+    assert!(write.is_released());
 
     rlock.shutdown();
 }
@@ -732,9 +741,7 @@ fn test_response_timeout_drops_connection() {
     // the timed-out connection must be dropped, so the next command runs on a new connection
     assert_ne!(id, client_id());
 
-    let mut conn = redis::Client::open(REDIS_URL.as_str()).unwrap().get_connection().unwrap();
-
-    redis::cmd("DEL").arg(key).exec(&mut conn).unwrap();
+    assert_key_released(key);
 
     rlock.shutdown();
 }
