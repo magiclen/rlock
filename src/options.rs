@@ -32,6 +32,7 @@ pub struct AcquireOptions {
 
 /// Errors for building acquisition options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AcquireOptionsBuildError {
     /// The TTL is shorter than Redis can represent in milliseconds.
     TtlTooShort,

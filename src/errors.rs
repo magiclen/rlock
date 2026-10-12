@@ -8,6 +8,7 @@ use redis::RedisError;
 
 /// Errors for handling lock acquisition failures.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum AcquireError {
     /// Error that occurred when interacting with Redis.
     RedisError(RedisError),
@@ -47,9 +48,10 @@ impl Display for AcquireError {
 
 impl Error for AcquireError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
+        // the wrapped error is displayed directly, so its source is the next cause
         match self {
-            Self::RedisError(error) => Some(error),
-            Self::WorkerError(error) => Some(error),
+            Self::RedisError(error) => error.source(),
+            Self::WorkerError(error) => error.source(),
             _ => None,
         }
     }
@@ -57,6 +59,7 @@ impl Error for AcquireError {
 
 /// Errors for handling lock release failures.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ReleaseError {
     /// Error that occurred when interacting with Redis.
     RedisError(RedisError),
@@ -83,9 +86,38 @@ impl Display for ReleaseError {
 
 impl Error for ReleaseError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
+        // the wrapped error is displayed directly, so its source is the next cause
         match self {
-            Self::RedisError(error) => Some(error),
-            Self::WorkerError(error) => Some(error),
+            Self::RedisError(error) => error.source(),
+            Self::WorkerError(error) => error.source(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn messages(error: &dyn Error) -> Vec<String> {
+        let mut messages = vec![error.to_string()];
+        let mut source = error.source();
+
+        while let Some(error) = source {
+            messages.push(error.to_string());
+            source = error.source();
+        }
+
+        messages
+    }
+
+    #[test]
+    fn test_error_chain() {
+        let error = AcquireError::WorkerError(io::Error::other("the lock worker stopped"));
+
+        assert_eq!(["the lock worker stopped"], messages(&error).as_slice());
+
+        let error = ReleaseError::WorkerError(io::Error::other("the lock worker stopped"));
+
+        assert_eq!(["the lock worker stopped"], messages(&error).as_slice());
     }
 }

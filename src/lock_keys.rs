@@ -11,6 +11,7 @@ pub struct LockKeys(Arc<Vec<String>>);
 
 /// Errors for building a collection of lock keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LockKeysBuildError {
     /// The collection is empty.
     Empty,

@@ -180,7 +180,7 @@ Do not run them concurrently against the same protected resource, and do not swi
 Waiting only the default 10 seconds is insufficient because old guards can renew their leases.
 The library does not automatically delete hashes encountered at read-write lock keys.
 
-The public error enums have gained variants; update exhaustive matches when upgrading.
+The public error enums have gained variants and are now `#[non_exhaustive]`, so a `match` on them needs a wildcard arm.
 The Tokio requirement is now 1.19 or later because shutdown coordination uses `watch::Sender::send_if_modified`.
 Review the timeout and shutdown contracts above when upgrading from earlier behavior.
 */
