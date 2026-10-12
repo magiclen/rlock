@@ -3,9 +3,14 @@ use std::sync::Arc;
 use super::{RLock, guard::GuardData};
 use crate::{AcquireError, AcquireOptions, LeaseState, ReleaseError, lock_request::LockTarget};
 
-/// A guard for an acquired Redis read lease.
-/// Dropping the guard stops renewal and queues release, with TTL expiry as a fallback if the queue is unavailable.
-/// A guard may outlive its lease, so use `lease_state` or `wait_until_inactive` to observe loss.
+/// A guard object representing an acquired Redis read lock.
+///
+/// # Behavior
+///
+/// * Multiple read guards can hold the same key at the same time, while a writer is excluded until all live readers are gone.
+/// * Dropping the guard releases the lock in the background; if the queue of the lock release manager is full or unavailable, the lock is released after its TTL expires in Redis.
+/// * Unless renewal is disabled, a background task (aka the renewal task) extends the lock's TTL until the lock is released.
+/// * The guard can outlive its lease, so use `lease_state` or `wait_until_inactive` to observe a lost lease.
 #[derive(Debug)]
 #[must_use = "Keep this guard alive while using the protected resource."]
 pub struct RReadLockGuard {
@@ -13,9 +18,26 @@ pub struct RReadLockGuard {
 }
 
 impl RReadLockGuard {
-    /// Releases the lease and waits for the Redis operation to complete.
+    /// Releases the lock and waits for the Redis operation to complete.
     /// Starting release stops renewal and marks the lease lost until release completes.
-    /// Cancellation or an error leaves the guard lost and allows release to be retried.
+    /// Cancellation or an error leaves the lease lost and allows release to be retried.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use rlock::async_lock::RLock;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let mut lock = rlock.acquire_read("rlock:example").await.unwrap();
+    ///
+    /// // shared section
+    ///
+    /// lock.release().await.unwrap();
+    /// # }
+    /// ```
     pub async fn release(&mut self) -> Result<(), ReleaseError> {
         self.data.release().await
     }
@@ -27,6 +49,7 @@ impl RReadLockGuard {
     }
 
     /// Returns the local lease state using its conservative deadline.
+    /// `LeaseState::Active` does not guarantee that a later external write is safe.
     pub fn lease_state(&self) -> LeaseState {
         self.data.lease.state()
     }
@@ -38,14 +61,68 @@ impl RReadLockGuard {
 }
 
 impl RLock {
-    /// Acquires a read lease with the default options.
+    /// Acquires a read (shared) lock with a key.
+    ///
+    /// # Behavior
+    ///
+    /// * Multiple readers can hold the lock on the same key at the same time, while a writer is exclusive.
+    /// * Readers are preferred: a writer may wait indefinitely under a continuous stream of readers, so consider setting a lock timeout on the writer side.
+    /// * The lock is stored as a Redis sorted set and its scripts write after reading the server time, so Redis 5.0 or later is required.
+    /// * Do not use the same key for a mutex and a read-write lock because their Redis types are different.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use rlock::async_lock::RLock;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let lock = rlock.acquire_read("rlock:example").await.unwrap();
+    ///
+    /// // shared section
+    ///
+    /// // drop(lock);
+    /// # }
+    /// ```
     pub async fn acquire_read(&self, key: impl AsRef<str>) -> Result<RReadLockGuard, AcquireError> {
         self.acquire_read_with_options(key, AcquireOptions::default()).await
     }
 
-    /// Acquires the lease using the supplied options.
-    /// A lock timeout covers the complete wait, including Redis I/O, and a zero timeout sends no command.
-    /// Cancelling the wait retains cleanup responsibility for an in-flight acquisition.
+    /// Acquires a read (shared) lock with a key and options.
+    /// A lock timeout covers retries and Redis I/O, and a zero timeout sends no command.
+    /// Cancelling the wait leaves the cleanup of an in-flight acquisition to a background task.
+    ///
+    /// See [`RLock::acquire_read`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use std::time::Duration;
+    ///
+    /// use rlock::{AcquireOptions, async_lock::RLock};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let lock = rlock
+    ///     .acquire_read_with_options(
+    ///         "rlock:example",
+    ///         AcquireOptions::builder()
+    ///             .ttl(Duration::from_secs(3))
+    ///             .build()
+    ///             .unwrap(),
+    ///     )
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// // shared section
+    ///
+    /// // drop(lock);
+    /// # }
+    /// ```
     pub async fn acquire_read_with_options(
         &self,
         key: impl AsRef<str>,
@@ -59,8 +136,8 @@ impl RLock {
         })
     }
 
-    /// Attempts to acquire a read lease without retrying contention.
-    /// Returns `Ok(None)` when another holder prevents acquisition.
+    /// Attempts to acquire a read (shared) lock once with a key.
+    /// Contention returns `Ok(None)`.
     pub async fn try_acquire_read(
         &self,
         key: impl AsRef<str>,
@@ -68,10 +145,9 @@ impl RLock {
         self.try_acquire_read_with_options(key, AcquireOptions::default()).await
     }
 
-    /// Attempts one acquisition using the supplied options.
-    /// A lock timeout covers the complete wait, including Redis I/O, and a zero timeout sends no command.
-    /// Cancelling the wait retains cleanup responsibility for an in-flight acquisition.
+    /// Attempts to acquire a read (shared) lock once with a key and options.
     /// Contention returns `Ok(None)`, while Redis failures and timeouts return an error.
+    /// Cancelling the wait leaves the cleanup of an in-flight acquisition to a background task.
     pub async fn try_acquire_read_with_options(
         &self,
         key: impl AsRef<str>,
@@ -86,9 +162,14 @@ impl RLock {
     }
 }
 
-/// A guard for an acquired Redis write lease.
-/// Dropping the guard stops renewal and queues release, with TTL expiry as a fallback if the queue is unavailable.
-/// A guard may outlive its lease, so use `lease_state` or `wait_until_inactive` to observe loss.
+/// A guard object representing an acquired Redis write lock.
+///
+/// # Behavior
+///
+/// * A write guard is exclusive: it excludes other writers and all readers on the same key.
+/// * Dropping the guard releases the lock in the background; if the queue of the lock release manager is full or unavailable, the lock is released after its TTL expires in Redis.
+/// * Unless renewal is disabled, a background task (aka the renewal task) extends the lock's TTL until the lock is released.
+/// * The guard can outlive its lease, so use `lease_state` or `wait_until_inactive` to observe a lost lease.
 #[derive(Debug)]
 #[must_use = "Keep this guard alive while using the protected resource."]
 pub struct RWriteLockGuard {
@@ -96,9 +177,26 @@ pub struct RWriteLockGuard {
 }
 
 impl RWriteLockGuard {
-    /// Releases the lease and waits for the Redis operation to complete.
+    /// Releases the lock and waits for the Redis operation to complete.
     /// Starting release stops renewal and marks the lease lost until release completes.
-    /// Cancellation or an error leaves the guard lost and allows release to be retried.
+    /// Cancellation or an error leaves the lease lost and allows release to be retried.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use rlock::async_lock::RLock;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let mut lock = rlock.acquire_write("rlock:example").await.unwrap();
+    ///
+    /// // critical section
+    ///
+    /// lock.release().await.unwrap();
+    /// # }
+    /// ```
     pub async fn release(&mut self) -> Result<(), ReleaseError> {
         self.data.release().await
     }
@@ -110,6 +208,7 @@ impl RWriteLockGuard {
     }
 
     /// Returns the local lease state using its conservative deadline.
+    /// `LeaseState::Active` does not guarantee that a later external write is safe.
     pub fn lease_state(&self) -> LeaseState {
         self.data.lease.state()
     }
@@ -121,8 +220,31 @@ impl RWriteLockGuard {
 }
 
 impl RLock {
-    /// Acquires a write lease with the default options.
-    /// Continuous readers may delay writers indefinitely, so consider a lock timeout.
+    /// Acquires a write (exclusive) lock with a key.
+    ///
+    /// # Behavior
+    ///
+    /// * A writer excludes other writers and all readers on the same key.
+    /// * Readers are preferred: a writer may wait indefinitely under a continuous stream of readers, so consider setting a lock timeout.
+    /// * The lock is stored as a Redis sorted set and its scripts write after reading the server time, so Redis 5.0 or later is required.
+    /// * Do not use the same key for a mutex and a read-write lock because their Redis types are different.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use rlock::async_lock::RLock;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let lock = rlock.acquire_write("rlock:example").await.unwrap();
+    ///
+    /// // critical section
+    ///
+    /// // drop(lock);
+    /// # }
+    /// ```
     pub async fn acquire_write(
         &self,
         key: impl AsRef<str>,
@@ -130,9 +252,39 @@ impl RLock {
         self.acquire_write_with_options(key, AcquireOptions::default()).await
     }
 
-    /// Acquires the lease using the supplied options.
-    /// A lock timeout covers the complete wait, including Redis I/O, and a zero timeout sends no command.
-    /// Cancelling the wait retains cleanup responsibility for an in-flight acquisition.
+    /// Acquires a write (exclusive) lock with a key and options.
+    /// A lock timeout covers retries and Redis I/O, and a zero timeout sends no command.
+    /// Cancelling the wait leaves the cleanup of an in-flight acquisition to a background task.
+    ///
+    /// See [`RLock::acquire_write`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use std::time::Duration;
+    ///
+    /// use rlock::{AcquireOptions, async_lock::RLock};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// let lock = rlock
+    ///     .acquire_write_with_options(
+    ///         "rlock:example",
+    ///         AcquireOptions::builder()
+    ///             .lock_timeout(Some(Duration::from_secs(3)))
+    ///             .build()
+    ///             .unwrap(),
+    ///     )
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// // critical section
+    ///
+    /// // drop(lock);
+    /// # }
+    /// ```
     pub async fn acquire_write_with_options(
         &self,
         key: impl AsRef<str>,
@@ -146,8 +298,8 @@ impl RLock {
         })
     }
 
-    /// Attempts to acquire a write lease without retrying contention.
-    /// Returns `Ok(None)` when another holder prevents acquisition.
+    /// Attempts to acquire a write (exclusive) lock once with a key.
+    /// Contention returns `Ok(None)`.
     pub async fn try_acquire_write(
         &self,
         key: impl AsRef<str>,
@@ -155,10 +307,9 @@ impl RLock {
         self.try_acquire_write_with_options(key, AcquireOptions::default()).await
     }
 
-    /// Attempts one acquisition using the supplied options.
-    /// A lock timeout covers the complete wait, including Redis I/O, and a zero timeout sends no command.
-    /// Cancelling the wait retains cleanup responsibility for an in-flight acquisition.
+    /// Attempts to acquire a write (exclusive) lock once with a key and options.
     /// Contention returns `Ok(None)`, while Redis failures and timeouts return an error.
+    /// Cancelling the wait leaves the cleanup of an in-flight acquisition to a background task.
     pub async fn try_acquire_write_with_options(
         &self,
         key: impl AsRef<str>,

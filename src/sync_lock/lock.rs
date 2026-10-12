@@ -3,12 +3,13 @@ use std::sync::Arc;
 use super::{RLock, guard::GuardData};
 use crate::{AcquireError, AcquireOptions, LeaseState, ReleaseError, lock_request::LockTarget};
 
-/// A guard object representing an acquired Redis lock.
+/// A guard object representing an acquired Redis mutex lock.
 ///
 /// # Behavior
 ///
-/// * Dropping the guard automatically releases the lock unless the buffer of the lock release manager is full (in that case, the lock is released after its TTL expires in Redis)
-/// * If the renewal interval is not set to `None`, a background thread (aka the renewal thread) is spawned to extend the lock's TTL. The thread is terminated when the lock is released.
+/// * Dropping the guard releases the lock in the background; if the queue of the lock release manager is full or unavailable, the lock is released after its TTL expires in Redis.
+/// * Unless renewal is disabled, a background thread (aka the renewal thread) extends the lock's TTL until the lock is released.
+/// * The guard can outlive its lease, so use `lease_state` to observe a lost lease.
 #[derive(Debug)]
 #[must_use = "Keep this guard alive while using the protected resource."]
 pub struct RLockGuard {
@@ -38,13 +39,15 @@ impl RLockGuard {
         self.inner.release()
     }
 
-    /// Returns whether explicit release completed successfully; an unreleased lease may already be lost.
+    /// Returns whether explicit release completed successfully.
+    /// This does not indicate whether an unreleased lease is still active.
     #[inline]
     pub const fn is_released(&self) -> bool {
         self.inner.is_released
     }
 
-    /// Returns the local lease state; Active does not guarantee that a later external write is safe.
+    /// Returns the local lease state using its conservative deadline.
+    /// `LeaseState::Active` does not guarantee that a later external write is safe.
     #[inline]
     pub fn lease_state(&self) -> LeaseState {
         self.inner.lease.state()
@@ -73,7 +76,7 @@ impl RLock {
     }
 
     /// Acquires a mutex lock with a key and options.
-    /// A lock timeout covers retries and Redis IO; a zero timeout sends no command.
+    /// A lock timeout covers retries and Redis I/O, and a zero timeout sends no command.
     ///
     /// # Examples
     ///
@@ -116,7 +119,8 @@ impl RLock {
         })
     }
 
-    /// Attempts to acquire a lock once; contention returns None and Redis IO can still wait.
+    /// Attempts to acquire a mutex lock once with a key.
+    /// Contention returns `Ok(None)`.
     #[inline]
     pub fn try_acquire_mutex(
         &self,
@@ -125,7 +129,8 @@ impl RLock {
         self.try_acquire_mutex_with_options(key, AcquireOptions::default())
     }
 
-    /// Attempts to acquire a lock once using the given TTL, renewal mode, and acquisition deadline.
+    /// Attempts to acquire a mutex lock once with a key and options.
+    /// Contention returns `Ok(None)`, while Redis failures and timeouts return an error.
     pub fn try_acquire_mutex_with_options(
         &self,
         key: impl AsRef<str>,

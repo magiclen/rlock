@@ -65,7 +65,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 `RenewalMode::Auto` renews at half the effective TTL; `RenewalMode::Interval(duration)` selects an interval, and `RenewalMode::Disabled` turns renewal off.
 TTL values are rounded down to whole milliseconds, and an enabled renewal interval must be shorter than the effective TTL.
 The builder validates these options before use.
-The existing `renew_interval` getter and builder method remain available.
 
 ## Sync and multiple keys
 
@@ -156,11 +155,13 @@ Shutdown wakes retry waits, but it cannot interrupt sync Redis I/O already in pr
 `shutdown()` seals the manager against new acquisitions and waits for releases already queued before its barrier.
 Concurrent calls wait for the same barrier, and cancelling an async shutdown wait does not cancel shutdown itself.
 Existing guards can continue renewing and explicitly releasing their leases after shutdown returns.
-The release worker finishes once no guard or pending cleanup still needs it and queued releases have drained.
+The release worker finishes once queued releases have drained and no guard or in-flight acquisition still needs it.
 In-flight acquisition commands finish independently and clean up results that are no longer accepted.
 Shutdown therefore does not wait for every live guard or every in-flight Redis command to end.
 
 ## Breaking changes and migration
+
+This section covers upgrades from 0.1.
 
 **Read-write lock storage changed from a Redis hash to a sorted set at the same key.**
 Old and new versions cannot coordinate read-write ownership on that key.
@@ -174,6 +175,10 @@ Do not run them concurrently against the same protected resource, and do not swi
 Waiting only the default 10 seconds is insufficient because old guards can renew their leases.
 The library does not automatically delete hashes encountered at read-write lock keys.
 
+`lock_timeout(Some(Duration::ZERO))` now returns `AcquireError::LockTimeout` without an acquisition attempt; use a `try_acquire_*` method to attempt once.
+`lock_timeout` now also covers Redis I/O, and a sync acquisition with a timeout runs on a worker thread.
+`AcquireOptionsBuilder::build` now rejects a renewal interval that is not shorter than the effective TTL.
+The `renew_interval` getter and builder method remain available alongside `renewal_mode`.
 The public error enums have gained variants and are now `#[non_exhaustive]`, so a `match` on them needs a wildcard arm.
 The Tokio requirement is now 1.19 or later because shutdown coordination uses `watch::Sender::send_if_modified`.
 Review the timeout and shutdown contracts above when upgrading from earlier behavior.

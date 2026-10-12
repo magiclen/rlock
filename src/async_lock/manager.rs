@@ -48,13 +48,31 @@ pub struct RLock {
 }
 
 impl RLock {
-    /// Connects to Redis and creates a lock manager.
+    /// Initializes a Redis connection manager.
+    ///
+    /// # Behavior
+    ///
+    /// 1. Parsing the input Redis URL (`redis_url`) and building a Redis connection manager.
+    /// 2. Spawning a background task (aka the lock release manager) responsible for handling asynchronous lock release requests.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use rlock::async_lock::RLock;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    /// # }
+    /// ```
     pub async fn new(redis_url: impl IntoConnectionInfo) -> Result<Self, RedisError> {
         let client = Client::open(redis_url)?;
         Self::with_connection_manager(client.get_connection_manager().await?).await
     }
 
-    /// Creates a lock manager using an existing Redis connection manager.
+    /// Initializes the lock manager with an existing Redis connection manager.
+    ///
+    /// See [`RLock::new`].
     pub async fn with_connection_manager(
         connection_manager: ConnectionManager,
     ) -> Result<Self, RedisError> {
@@ -115,13 +133,32 @@ impl RLock {
         *self.inner.shutdown.borrow() == ShutdownState::Open
     }
 
-    /// Stops new acquisitions and waits for previously queued releases to finish.
+    /// Shuts down the RLock manager.
+    ///
+    /// # Behavior
+    ///
+    /// Stops new acquisitions and waits for release requests already in the queue.
     /// Existing guards can still renew and release their leases after this returns.
-    /// Concurrent calls wait for the same shutdown barrier, and cancellation does not stop shutdown.
+    /// Concurrent calls wait for the same shutdown barrier, and cancelling the wait does not stop shutdown.
     ///
     /// # Panics
     ///
-    /// Panics if the release worker cannot complete the shutdown barrier.
+    /// Panics if the lock release manager cannot complete the shutdown barrier.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use rlock::async_lock::RLock;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() {
+    /// let rlock = RLock::new("redis://127.0.0.1:6379/0").await.unwrap();
+    ///
+    /// // do something
+    ///
+    /// rlock.shutdown().await;
+    /// # }
+    /// ```
     pub async fn shutdown(&self) {
         let mut changed = self.inner.shutdown.subscribe();
         {

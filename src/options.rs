@@ -126,7 +126,7 @@ impl AcquireOptions {
         self.retry_interval
     }
 
-    /// Maximum duration for acquisition, including retries and Redis IO.
+    /// Maximum duration for acquisition, including retries and Redis I/O.
     ///
     /// If `None`, acquisition has no deadline; a zero duration returns a timeout without sending a command.
     #[inline]
@@ -202,7 +202,7 @@ impl AcquireOptionsBuilder {
         self
     }
 
-    /// Maximum duration for acquisition, including retries and Redis IO.
+    /// Maximum duration for acquisition, including retries and Redis I/O.
     ///
     /// If `None`, acquisition has no deadline; a zero duration returns a timeout without sending a command.
     #[inline]

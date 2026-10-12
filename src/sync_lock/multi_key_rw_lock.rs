@@ -8,8 +8,9 @@ use crate::{AcquireError, AcquireOptions, LeaseState, ReleaseError, lock_request
 /// # Behavior
 ///
 /// * Multiple read guards can hold the same keys at the same time, while a writer is excluded until all live readers are gone.
-/// * Dropping the guard automatically releases the lock unless the buffer of the lock release manager is full (in that case, the lock is released after its TTL expires in Redis)
-/// * If the renewal interval is not set to `None`, a background thread (aka the renewal thread) is spawned to extend the lock's TTL. The thread is terminated when the lock is released.
+/// * Dropping the guard releases the lock in the background; if the queue of the lock release manager is full or unavailable, the lock is released after its TTL expires in Redis.
+/// * Unless renewal is disabled, a background thread (aka the renewal thread) extends the lock's TTL until the lock is released.
+/// * The guard can outlive its lease, so use `lease_state` to observe a lost lease.
 #[derive(Debug)]
 #[must_use = "Keep this guard alive while using the protected resource."]
 pub struct RMultiKeyReadLockGuard {
@@ -46,13 +47,15 @@ impl RMultiKeyReadLockGuard {
         self.inner.release()
     }
 
-    /// Returns whether explicit release completed successfully; an unreleased lease may already be lost.
+    /// Returns whether explicit release completed successfully.
+    /// This does not indicate whether an unreleased lease is still active.
     #[inline]
     pub const fn is_released(&self) -> bool {
         self.inner.is_released
     }
 
-    /// Returns the local lease state; Active does not guarantee that a later external write is safe.
+    /// Returns the local lease state using its conservative deadline.
+    /// `LeaseState::Active` does not guarantee that a later external write is safe.
     #[inline]
     pub fn lease_state(&self) -> LeaseState {
         self.inner.lease.state()
@@ -64,8 +67,9 @@ impl RMultiKeyReadLockGuard {
 /// # Behavior
 ///
 /// * A write guard is exclusive: it excludes other writers and all readers on the same keys.
-/// * Dropping the guard automatically releases the lock unless the buffer of the lock release manager is full (in that case, the lock is released after its TTL expires in Redis)
-/// * If the renewal interval is not set to `None`, a background thread (aka the renewal thread) is spawned to extend the lock's TTL. The thread is terminated when the lock is released.
+/// * Dropping the guard releases the lock in the background; if the queue of the lock release manager is full or unavailable, the lock is released after its TTL expires in Redis.
+/// * Unless renewal is disabled, a background thread (aka the renewal thread) extends the lock's TTL until the lock is released.
+/// * The guard can outlive its lease, so use `lease_state` to observe a lost lease.
 #[derive(Debug)]
 #[must_use = "Keep this guard alive while using the protected resource."]
 pub struct RMultiKeyWriteLockGuard {
@@ -102,13 +106,15 @@ impl RMultiKeyWriteLockGuard {
         self.inner.release()
     }
 
-    /// Returns whether explicit release completed successfully; an unreleased lease may already be lost.
+    /// Returns whether explicit release completed successfully.
+    /// This does not indicate whether an unreleased lease is still active.
     #[inline]
     pub const fn is_released(&self) -> bool {
         self.inner.is_released
     }
 
-    /// Returns the local lease state; Active does not guarantee that a later external write is safe.
+    /// Returns the local lease state using its conservative deadline.
+    /// `LeaseState::Active` does not guarantee that a later external write is safe.
     #[inline]
     pub fn lease_state(&self) -> LeaseState {
         self.inner.lease.state()
@@ -121,6 +127,7 @@ impl RLock {
     /// The key list must not be empty and each key must be unique.
     /// Debug builds assert these programmer invariants.
     /// Release builds skip these checks for performance because callers are expected to pass keys chosen by the program rather than direct user input.
+    /// Use [`LockKeys`](crate::LockKeys) to validate the keys once and reuse them.
     ///
     /// See [`RLock::acquire_read`] for the behavior of read locks.
     ///
@@ -201,6 +208,7 @@ impl RLock {
     /// The key list must not be empty and each key must be unique.
     /// Debug builds assert these programmer invariants.
     /// Release builds skip these checks for performance because callers are expected to pass keys chosen by the program rather than direct user input.
+    /// Use [`LockKeys`](crate::LockKeys) to validate the keys once and reuse them.
     ///
     /// See [`RLock::acquire_write`] for the behavior of write locks.
     ///
@@ -276,7 +284,10 @@ impl RLock {
         })
     }
 
-    /// Attempts to acquire a lock once; contention returns None and Redis IO can still wait.
+    /// Attempts to acquire a read (shared) lock once with multiple keys.
+    /// Contention returns `Ok(None)`.
+    ///
+    /// See [`RLock::acquire_multi_key_read`] for the requirements of the keys.
     #[inline]
     pub fn try_acquire_multi_key_read(
         &self,
@@ -285,7 +296,10 @@ impl RLock {
         self.try_acquire_multi_key_read_with_options(keys, AcquireOptions::default())
     }
 
-    /// Attempts to acquire a lock once using the given TTL, renewal mode, and acquisition deadline.
+    /// Attempts to acquire a read (shared) lock once with multiple keys and options.
+    /// Contention returns `Ok(None)`, while Redis failures and timeouts return an error.
+    ///
+    /// See [`RLock::acquire_multi_key_read`] for the requirements of the keys.
     pub fn try_acquire_multi_key_read_with_options(
         &self,
         keys: impl Into<Arc<Vec<String>>>,
@@ -298,7 +312,10 @@ impl RLock {
         })
     }
 
-    /// Attempts to acquire a lock once; contention returns None and Redis IO can still wait.
+    /// Attempts to acquire a write (exclusive) lock once with multiple keys.
+    /// Contention returns `Ok(None)`.
+    ///
+    /// See [`RLock::acquire_multi_key_write`] for the requirements of the keys.
     #[inline]
     pub fn try_acquire_multi_key_write(
         &self,
@@ -307,7 +324,10 @@ impl RLock {
         self.try_acquire_multi_key_write_with_options(keys, AcquireOptions::default())
     }
 
-    /// Attempts to acquire a lock once using the given TTL, renewal mode, and acquisition deadline.
+    /// Attempts to acquire a write (exclusive) lock once with multiple keys and options.
+    /// Contention returns `Ok(None)`, while Redis failures and timeouts return an error.
+    ///
+    /// See [`RLock::acquire_multi_key_write`] for the requirements of the keys.
     pub fn try_acquire_multi_key_write_with_options(
         &self,
         keys: impl Into<Arc<Vec<String>>>,
