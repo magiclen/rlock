@@ -9,6 +9,7 @@ use redis::{Client, Connection, ConnectionLike, RedisResult};
 
 const DEFAULT_MAX_IDLE_CONNECTIONS: usize = 8;
 const DEFAULT_CONNECTION_TIMEOUT: Option<Duration> = None;
+const DEFAULT_RESPONSE_TIMEOUT: Option<Duration> = None;
 
 /// Options used when building the connection pool of a sync `RLock` manager.
 ///
@@ -21,12 +22,14 @@ const DEFAULT_CONNECTION_TIMEOUT: Option<Duration> = None;
 ///
 /// let options = PoolOptions::new()
 ///     .max_idle_connections(4)
-///     .connection_timeout(Some(Duration::from_secs(3)));
+///     .connection_timeout(Some(Duration::from_secs(3)))
+///     .response_timeout(Some(Duration::from_secs(1)));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolOptions {
     pub(crate) max_idle_connections: usize,
     pub(crate) connection_timeout:   Option<Duration>,
+    pub(crate) response_timeout:     Option<Duration>,
 }
 
 impl Default for PoolOptions {
@@ -43,6 +46,7 @@ impl PoolOptions {
         Self {
             max_idle_connections: DEFAULT_MAX_IDLE_CONNECTIONS,
             connection_timeout:   DEFAULT_CONNECTION_TIMEOUT,
+            response_timeout:     DEFAULT_RESPONSE_TIMEOUT,
         }
     }
 
@@ -65,6 +69,17 @@ impl PoolOptions {
 
         self
     }
+
+    /// Maximum duration to wait when sending a command or reading its reply.
+    ///
+    /// If `None`, Redis I/O can wait indefinitely, so the worker of a timed acquisition can stay blocked after the caller has timed out.
+    /// The duration must not be zero.
+    #[inline]
+    pub const fn response_timeout(mut self, duration: Option<Duration>) -> Self {
+        self.response_timeout = duration;
+
+        self
+    }
 }
 
 /// A simple connection pool which keeps a limited number of idle connections for reuse.
@@ -72,7 +87,7 @@ impl PoolOptions {
 /// # Behavior
 ///
 /// * When no idle connection is available, a new connection is created, so checking out never blocks.
-/// * A connection which has hit an IO error is not open anymore, so it is dropped instead of being returned to the pool, and a following checkout creates a fresh connection. This approximates the transparent reconnection of the async connection manager.
+/// * A connection whose command has failed is dropped instead of being returned to the pool, and a following checkout creates a fresh connection. This approximates the transparent reconnection of the async connection manager and never reuses a connection whose reply state is unknown after a timeout.
 /// * The pool does not ping a connection on checkout and does not recycle idle connections by age. A stale connection which has been closed by the server costs one failed call before it is discarded.
 pub(crate) struct ConnectionPool {
     client:  Client,
@@ -99,10 +114,17 @@ impl ConnectionPool {
 
     #[inline]
     fn connect(&self) -> RedisResult<Connection> {
-        match self.options.connection_timeout {
+        let conn = match self.options.connection_timeout {
             Some(timeout) => self.client.get_connection_with_timeout(timeout),
             None => self.client.get_connection(),
+        }?;
+
+        if let Some(timeout) = self.options.response_timeout {
+            conn.set_read_timeout(Some(timeout))?;
+            conn.set_write_timeout(Some(timeout))?;
         }
+
+        Ok(conn)
     }
 
     /// Checks out a connection from the pool, or creates a new one if no idle connection is available.
@@ -118,6 +140,22 @@ impl ConnectionPool {
         Ok(PooledConnection {
             pool: self, conn: Some(conn)
         })
+    }
+
+    /// Runs a function with a pooled connection, dropping the connection if the function fails.
+    pub(crate) fn with_connection<T>(
+        &self,
+        f: impl FnOnce(&mut Connection) -> RedisResult<T>,
+    ) -> RedisResult<T> {
+        let mut conn = self.checkout()?;
+        let result = f(&mut conn);
+
+        if result.is_err() {
+            // the reply state is unknown after an error such as a timeout, so this connection must not be reused
+            conn.conn.take();
+        }
+
+        result
     }
 
     /// Returns a connection to the pool, dropping it if it is broken or if the pool is full.

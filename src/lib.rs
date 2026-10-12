@@ -157,6 +157,7 @@ A network error can leave the server-side outcome unknown, and stopping the Toki
 
 Sync acquisitions use an additional worker only when `lock_timeout` is `Some`.
 The deadline bounds the caller's wait and does not guarantee that background I/O or cleanup ends immediately.
+Set `PoolOptions::response_timeout` to bound sync Redis I/O, so a worker cannot stay blocked when Redis stops responding.
 Without an acquisition timeout, the sync API performs Redis I/O inline.
 Shutdown wakes retry waits, but it cannot interrupt sync Redis I/O already in progress.
 

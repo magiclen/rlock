@@ -240,8 +240,7 @@ impl RLock {
             let acquired = acquire_lock(&self.inner.pool, &request, ttl)?;
             if acquired {
                 let lease = Lease::new(attempt, ttl);
-                let admission = self.inner.release_tx.lock().unwrap();
-                let failure = if admission.is_none() {
+                let failure = if self.is_shutdown() {
                     Some(AcquireError::Shutdown)
                 } else if canceled.load(Ordering::Acquire)
                     || options.lock_timeout().is_some_and(|timeout| start.elapsed() >= timeout)
@@ -253,16 +252,14 @@ impl RLock {
                     None
                 };
                 if let Some(error) = failure {
-                    drop(admission);
                     if let Err(error) = release_lock(&self.inner.pool, &request) {
                         tracing::error!(uuid = %request.uuid, "cannot clean up a late acquisition: {error}");
                     }
                     return Err(error);
                 }
-                let guard =
-                    GuardData::new(self.clone(), request, release_tx, lease, attempt, &options)?;
-                drop(admission);
-                return Ok(Some(guard));
+                // shutdown does not wait for existing guards, so the renewal thread is spawned without holding the admission lock
+                return GuardData::new(self.clone(), request, release_tx, lease, attempt, &options)
+                    .map(Some);
             }
             if self.is_shutdown() {
                 return Err(AcquireError::Shutdown);
